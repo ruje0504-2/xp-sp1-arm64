@@ -21,10 +21,10 @@ KiArm64VectorTable:
     VECTOR KiArm64IrqEntry
     VECTOR KiArm64FiqEntry
     VECTOR KiArm64SErrorEntry
-    VECTOR KiArm64SyncEntry
-    VECTOR KiArm64IrqEntry
-    VECTOR KiArm64FiqEntry
-    VECTOR KiArm64SErrorEntry
+    VECTOR KiArm64UserSyncEntry
+    VECTOR KiArm64UserIrqEntry
+    VECTOR KiArm64UserFiqEntry
+    VECTOR KiArm64UserSErrorEntry
     VECTOR KiArm64Fatal
     VECTOR KiArm64Fatal
     VECTOR KiArm64Fatal
@@ -191,3 +191,5 @@ KiArm64Fatal:
 4:
     wfe
     b 4b
+
+#include "userentry.inc"

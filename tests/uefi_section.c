@@ -2,6 +2,8 @@
 #include "../base/ntos/mm/arm64/bootmap.h"
 #include "../base/ntos/ob/arm64/bootobject.h"
 #include "../base/ntos/mm/arm64/userspace.h"
+#include "../base/ntos/ke/arm64/userentry.h"
+#include "xp-user-services.h"
 #include "uefi_test.h"
 
 static ULONG check_physical_section(VOID)
@@ -182,9 +184,81 @@ static VOID check_low_user_pages(VOID)
     XpTestReport("PASS: isolated low ARM64 user pages and read-only shared data via unprivileged accesses\n");
 }
 
+extern const UCHAR XpUserProgram[], XpUserReadonlyWrite[], XpUserProgramEnd[];
+
+static VOID check_user_service(VOID)
+{
+    const ULONG code = 0x20000, stack = 0x50000;
+    SIZE_T length = (ULONG_PTR)XpUserProgramEnd - (ULONG_PTR)XpUserProgram;
+    CHECK(length && length < PAGE_SIZE);
+    MM_ARM64_USER_SPACE space = {0};
+    KARM64_USER_ENTRY *entry = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, 'eUsT');
+    CHECK(entry && sizeof(*entry) < PAGE_SIZE);
+    RtlZeroMemory(entry, sizeof(*entry));
+    entry->Frame.Pc = code;
+    entry->Frame.Sp = stack + PAGE_SIZE;
+    entry->Frame.X[2] = MM_ARM64_USER_SHARED_VA + FIELD_OFFSET(KUSER_SHARED_DATA, InterruptTime);
+    ULONG64 daif;
+    __asm__ volatile("mrs %0, daif\nmsr daifset, #15" : "=r"(daif) :: "memory");
+    PXP_ARM64_BOOT_BLOCK boot = CONTAINING_RECORD(KeLoaderBlock, XP_ARM64_BOOT_BLOCK, Nt);
+    CHECK(MmArm64CreateUserSpace(&space, boot) == STATUS_SUCCESS);
+    CHECK(MmArm64MapUserPages(&space, code, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS &&
+          MmArm64MapUserPages(&space, stack, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS &&
+          MmArm64CopyUserBuffer(&space, code, (PVOID)XpUserProgram, length, TRUE) == STATUS_SUCCESS &&
+          MmArm64ProtectUserPages(&space, code, PAGE_SIZE, PAGE_EXECUTE_READ) == STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    ULONG services = 0, interrupts = 0;
+    ULONG64 permission_esr = 0;
+    ULONGLONG deadline = KeQueryInterruptTime() + 20000000;
+    for (;;) {
+        CHECK(KeQueryInterruptTime() < deadline && KiArm64RunUser(&space, entry) == STATUS_SUCCESS &&
+              entry->Frame.PreviousMode == UserMode && !(entry->Frame.Cpsr & 31) &&
+              entry->Frame.Pc >= code && entry->Frame.Pc < code + length);
+        if (entry->VectorKind == 1) {
+            ++interrupts;
+            continue;
+        }
+        CHECK(!entry->VectorKind);
+        if (entry->Frame.Esr >> 26 == 0x24) {
+            CHECK(!permission_esr && (entry->Frame.Esr & 0x7f) == 0x4f &&
+                  entry->Frame.Far == entry->Frame.X[2] &&
+                  entry->Frame.Pc == code + (ULONG_PTR)XpUserReadonlyWrite - (ULONG_PTR)XpUserProgram);
+            permission_esr = entry->Frame.Esr;
+            entry->Frame.Pc += 4; /* Skip only this control's known faulting store. */
+            continue;
+        }
+        if (entry->Frame.Esr >> 26 == 0x3c) break;
+        CHECK(entry->Frame.Esr >> 26 == 0x15 && ++services <= 3 &&
+              entry->Frame.X[8] == (services == 3 ? 0xffff : XP_SERVICE_QUERY_PERFORMANCE_COUNTER));
+        CHECK(KiArm64UserService(&space, entry) == STATUS_SUCCESS);
+    }
+    CHECK(interrupts && permission_esr && services == 3 && (entry->Frame.Esr & 0xffff) == 0x37 &&
+          entry->Frame.Sp == stack + PAGE_SIZE && entry->Frame.X[19] == stack + PAGE_SIZE - 32 &&
+          entry->Frame.X[25] == 0x5678 && entry->Frame.X[26] == 0x5678 &&
+          (ULONG)entry->Frame.X[23] == (ULONG)STATUS_ACCESS_VIOLATION &&
+          (ULONG)entry->Frame.X[24] == (ULONG)STATUS_INVALID_SYSTEM_SERVICE);
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER now;
+    CHECK(NtQueryPerformanceCounter(&now, &frequency) == STATUS_SUCCESS &&
+          entry->Frame.X[21] && entry->Frame.X[21] <= (ULONG64)now.QuadPart &&
+          entry->Frame.X[22] == (ULONG64)frequency.QuadPart);
+    XpTestReport("EL0 service evidence pc="); XpTestHex(entry->Frame.Pc);
+    XpTestReport(" svc_count="); XpTestHex(services);
+    XpTestReport(" counter="); XpTestHex(entry->Frame.X[21]);
+    XpTestReport(" frequency="); XpTestHex(entry->Frame.X[22]);
+    XpTestReport(" irqs="); XpTestHex(interrupts);
+    XpTestReport(" write_esr="); XpTestHex(permission_esr); XpTestReport("\n");
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    MmArm64DestroyUserSpace(&space);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    ExFreePool(entry);
+    XpTestReport("PASS: private TTBR0 EL0 execution, native NT counter SVC and register return\n");
+}
+
 VOID XpCheckBootSectionPhase1(VOID)
 {
     check_low_user_pages();
+    check_user_service();
     ULONG bits = check_physical_section();
     ULONG ptes = check_reserved_section();
     XpTestReport("Section Phase 1 evidence pa_bits="); XpTestHex(bits);
