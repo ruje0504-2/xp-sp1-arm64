@@ -234,6 +234,35 @@ static NTSTATUS map_boot_pfn_database(PXP_ARM64_BOOT_BLOCK block)
     return backing == backing_limit ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_STATE;
 }
 
+static NTSTATUS map_boot_display(PXP_ARM64_BOOT_BLOCK block)
+{
+    XP_ARM64_BOOT_DISPLAY *display = &block->Display;
+    PMM_ARM64_BOOT_TABLES tables = &block->Tables;
+    if (!display->PhysicalBase) return STATUS_SUCCESS;
+    ULONG64 pages = (display->Bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
+    /* Reserve the active mode's span only. Validate existing RAM attributes
+     * before replacing any aliases in the cloned tables. */
+    for (ULONG64 page = 0; page < pages; ++page) {
+        ULONG64 pa = display->PhysicalBase + (page << PAGE_SHIFT);
+        ULONG64 par = MmArm64QueryTranslation(pa, TRUE);
+        if ((par & 1) || (par & PA_MASK) != pa || (par >> 56) != 255 || ((par >> 7) & 3) != 3)
+            return STATUS_SUCCESS;
+    }
+    for (ULONG64 page = 0; page < pages; ++page) {
+        ULONG64 offset = page << PAGE_SHIFT;
+        ULONG64 pa = display->PhysicalBase + offset;
+        volatile ULONG64 *pte = page_entry(tables, pa);
+        if (!pte) return STATUS_INSUFFICIENT_RESOURCES;
+        ULONG64 descriptor = pa | (*pte & (PTE_ATTR_INDEX | PTE_NONSECURE)) |
+            PTE_INNER_SHAREABLE | PTE_ACCESS_FLAG | PTE_PXN | PTE_UXN | PTE_VALID | PTE_TABLE;
+        NTSTATUS status = map_upper_page(tables, MM_BOOT_DISPLAY_BASE + offset, descriptor);
+        if (!NT_SUCCESS(status)) return status;
+        *pte = 0;
+    }
+    display->VirtualBase = MM_BOOT_DISPLAY_BASE;
+    return STATUS_SUCCESS;
+}
+
 static VOID clean_tables(PMM_ARM64_BOOT_TABLES state)
 {
     ULONG64 ctr;
@@ -324,6 +353,8 @@ NTSTATUS MmArm64TakeBootMappings(PXP_ARM64_BOOT_BLOCK block)
     NTSTATUS status=map_boot_image(state,image,limit);
     if (!NT_SUCCESS(status)) return status;
     status=map_kernel_shared_page(state,shared);
+    if (!NT_SUCCESS(status)) return status;
+    status=map_boot_display(block);
     if (!NT_SUCCESS(status)) return status;
     status=map_boot_pfn_database(block);
     if (!NT_SUCCESS(status)) return status;

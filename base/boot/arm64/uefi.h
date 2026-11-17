@@ -59,6 +59,15 @@ typedef struct {
     PVOID LoadImage, StartImage, Exit, UnloadImage;
     XP_EFI_EXIT_BOOT_SERVICES ExitBootServices;
 } XP_EFI_BOOT_SERVICES_PREFIX;
+typedef XP_EFI_STATUS (*XP_EFI_LOCATE_PROTOCOL)(const GUID *, PVOID, PVOID *);
+typedef struct {
+    XP_EFI_BOOT_SERVICES_PREFIX Prefix;
+    PVOID GetNextMonotonicCount, Stall, SetWatchdogTimer;
+    PVOID ConnectController, DisconnectController, OpenProtocol, CloseProtocol;
+    PVOID OpenProtocolInformation, ProtocolsPerHandle, LocateHandleBuffer;
+    XP_EFI_LOCATE_PROTOCOL LocateProtocol;
+} XP_EFI_PROTOCOL_SERVICES;
+
 typedef struct {
     XP_EFI_TABLE_HEADER Hdr;
     PWCHAR FirmwareVendor;
@@ -78,5 +87,6 @@ _Static_assert(offsetof(XP_EFI_BOOT_SERVICES_PREFIX, AllocatePages) == 40, "UEFI
 _Static_assert(offsetof(XP_EFI_BOOT_SERVICES_PREFIX, GetMemoryMap) == 56, "UEFI map");
 _Static_assert(offsetof(XP_EFI_BOOT_SERVICES_PREFIX, HandleProtocol) == 152, "UEFI protocol");
 _Static_assert(offsetof(XP_EFI_BOOT_SERVICES_PREFIX, ExitBootServices) == 232, "UEFI exit");
+_Static_assert(offsetof(XP_EFI_PROTOCOL_SERVICES, LocateProtocol) == 320, "UEFI LocateProtocol");
 _Static_assert(offsetof(XP_EFI_SYSTEM_TABLE, BootServices) == 96, "UEFI services");
 #endif

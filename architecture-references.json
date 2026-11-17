@@ -1,0 +1,104 @@
+{
+  "purpose": "Architecture contracts for the early identity-root handoff; no external source implementation copied",
+  "references": [
+    {
+      "url": "https://documentation-service.arm.com/static/5efa1d23dbdee951c1ccdec5",
+      "title": "Armv8-A Address Translation",
+      "version": "Arm 100940_0101_en, version 1.1",
+      "copyright": "Arm Limited",
+      "use": "Translation geometry, barriers and TLB maintenance; 4KiB 48-bit TTBR1 region with independent high shared-data page"
+    },
+    {
+      "url": "https://documentation-service.arm.com/static/6ac508d3f59e042617c76666",
+      "title": "AArch64 Memory Management Guide",
+      "use": "Break-before-make requirements for mapping size changes",
+      "copyright": "Arm Limited"
+    },
+    {
+      "url": "https://github.com/tianocore/edk2/blob/edk2-stable202408/ArmPkg/Library/ArmMmuLib/AArch64/ArmMmuLibReplaceEntry.S",
+      "revision": "edk2-stable202408",
+      "license": "BSD-2-Clause-Patent",
+      "copyright": "2016 Linaro Limited",
+      "use": "Reference for an identity MMU-off interval when the replaced mapping covers executing code",
+      "code_copied": false
+    },
+    {
+      "url": "https://github.com/tianocore/edk2/blob/edk2-stable202408/ArmPkg/Library/ArmMmuLib/AArch64/ArmMmuLibCore.c",
+      "revision": "edk2-stable202408",
+      "license": "BSD-2-Clause-Patent",
+      "copyright": "2011-2020 ARM Limited; 2016 Linaro Limited; 2017 Intel Corporation",
+      "use": "Reference for BBM and Cortex-A57 erratum 822227: TG1[1] must be set even with EPD1",
+      "code_copied": false
+    },
+    {
+      "url": "https://github.com/ruje0504-2/winx",
+      "title": "User-provided WinX Switch Lite installation and driver reference",
+      "accessed_local_date": "2026-11-17",
+      "observed_branch": "hdh001-hekate-sd",
+      "use": "Read-only reference for future Switch boot/hardware preparation; not XP boot evidence",
+      "code_copied": false,
+      "device_operations_authorized": false
+    },
+    {
+      "url": "https://documentation-service.arm.com/static/5ed6547eca06a95ce53f9321",
+      "title": "Critical Interrupt Prioritization",
+      "version": "Arm, Michael Williams, September 2014, pages 2 and 7",
+      "use": "Save exception state before enabling nested IRQs; mask before restoring exception-return state; WFI wakes for a pending physical IRQ masked by PSTATE.I but not one blocked by GIC priority",
+      "code_copied": false
+    },
+    {
+      "url": "https://developer.arm.com/documentation/ihi0048/latest/",
+      "title": "Arm Generic Interrupt Controller Architecture Specification",
+      "version": "Arm IHI 0048, GICv2",
+      "use": "Local SGIR target filter, PMR priority masking and full IAR token for EOI before dispatcher callbacks",
+      "code_copied": false
+    },
+    {
+      "url": "https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Instructions/IC-IALLU--Instruction-Cache-Invalidate-All-to-PoU?lang=en",
+      "title": "IC IALLU, Instruction Cache Invalidate All to PoU",
+      "use": "Local instruction cache alias retirement after the final TTBR switch and before the high kernel branch",
+      "code_copied": false
+    },
+    {
+      "url": "https://documentation-service.arm.com/static/5e906b9fc8052b1608760b6b",
+      "title": "Cortex-A57 MPCore Processor Technical Reference Manual",
+      "version": "ARM DDI 0488H",
+      "use": "CLIDR_EL1 cache types, CSSELR_EL1 selection and CCSIDR_EL1 line-size discovery in KeInitSystem",
+      "code_copied": false
+    },
+    {
+      "url": "https://learn.microsoft.com/windows/win32/api/sysinfoapi/ns-sysinfoapi-system_info",
+      "title": "Windows SYSTEM_INFO processor architecture identifiers",
+      "use": "Windows ARM64 native architecture identifier",
+      "code_copied": false
+    },
+    {
+      "url": "https://uefi.org/sites/default/files/resources/UEFI_Spec_2_10_Aug29.pdf",
+      "title": "UEFI Specification 2.10, chapters 9, 10 and 13",
+      "copyright": "UEFI Forum",
+      "use": "Loaded Image source DeviceHandle, packed Device Path nodes and Simple File System on the boot volume",
+      "code_copied": false
+    },
+    {
+      "url": "https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html",
+      "title": "UEFI 2.10 Graphics Output Protocol",
+      "copyright": "UEFI Forum",
+      "use": "Linear framebuffer address, active geometry, stride and RGBX/BGRX layouts",
+      "code_copied": false
+    },
+    {
+      "url": "https://github.com/tianocore/edk2/blob/edk2-stable202408/OvmfPkg/QemuRamfbDxe/QemuRamfb.c",
+      "title": "EDK2 QemuRamfbDxe",
+      "revision": "edk2-stable202408",
+      "license": "BSD-2-Clause-Patent",
+      "use": "QEMU firmware initializes RAMFB in reserved RAM before the loader enters",
+      "code_copied": false
+    },
+    {
+      "url": "https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html",
+      "title": "QEMU QMP screendump",
+      "use": "Host capture of simulated display output for byte-for-byte comparison",
+      "code_copied": false
+    }
+  ]
+}

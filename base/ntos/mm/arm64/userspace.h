@@ -18,8 +18,10 @@ NTSTATUS MmArm64MapUserPages(MM_ARM64_USER_SPACE *Space, ULONG_PTR Base, SIZE_T 
 NTSTATUS MmArm64ProtectUserPages(MM_ARM64_USER_SPACE *Space, ULONG_PTR Base,
                                  SIZE_T Bytes, ULONG Protection);
 NTSTATUS MmArm64UnmapUserPages(MM_ARM64_USER_SPACE *Space, ULONG_PTR Base, SIZE_T Bytes);
+NTSTATUS MmArm64ProbeUserRead(MM_ARM64_USER_SPACE *Space, ULONG_PTR Address, SIZE_T Bytes);
 /* Copy through the PFN direct view, checking the whole range first. */
 NTSTATUS MmArm64CopyUserBuffer(MM_ARM64_USER_SPACE *Space, ULONG_PTR Address,
                                PVOID Buffer, SIZE_T Bytes, BOOLEAN ToUser);
+BOOLEAN MmArm64UserCodeAddress(MM_ARM64_USER_SPACE *Space, ULONG_PTR Pc);
 BOOLEAN MmArm64InitializeSharedUserPte(VOID);
 #endif

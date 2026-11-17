@@ -1,5 +1,32 @@
-# XP SP1 ARM64
+# XP SP1 ARM64 port sources
 
-此分支保存原生 ARM64 移植中经审查的源文件，包括启动设备路径、页表、低地址用户空间、上下文与 QEMU 检查代码。源快照来自本地主线 `a478fe4eae68a996bc75001e6ed4b9f7d78379bc`。独立构建仍需另行取得适当授权的 NT 源码、头文件和构建环境。
+This repository contains an audited subset of the native ARM64 port and its test
+sources. It covers the UEFI boot path, AArch64 exception entry and context switching,
+kernel and process address spaces, native user-mode dispatch, and software rendering.
 
-ARM64 展开器基于 .NET Runtime v8.0.0。固定上游版本、文件哈希和 MIT 许可见 [来源记录](third_party/dotnet-unwind/source.json) 和 [许可证](third_party/dotnet-unwind/LICENSE.TXT)。
+The integration build requires separately authorized Windows XP SP1 source and
+port overlays. This export does not contain the complete build inputs or a bootable
+image. Integrated results from the development tree were obtained in QEMU.
+Nintendo Switch Lite hardware execution is pending.
+
+## Standalone controls on ARM64 macOS
+
+From the repository root, compile and run the atomic operations and context-capture
+controls with the Apple toolchain.
+
+```sh
+mkdir -p out
+clang -arch arm64 -march=armv8-a -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+  tests/interlocked_test.c base/ntos/ex/arm64/interlocked.S -o out/interlocked-test
+./out/interlocked-test
+
+clang -arch arm64 -march=armv8-a -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+  -Ipublic/sdk/inc tests/context_test.c tests/capture_fixture.S \
+  base/ntos/rtl/arm64/capture.S -o out/context-test
+./out/context-test
+```
+
+## Third-party source
+
+The ARM64 unwind implementation uses .NET Runtime code. The upstream files, pinned
+source references, and MIT notice are in [third_party/dotnet-unwind](third_party/dotnet-unwind).

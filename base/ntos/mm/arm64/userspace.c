@@ -95,6 +95,13 @@ static BOOLEAN valid_range(ULONG_PTR address, SIZE_T size)
     return address >= 0x10000 && address < USER_LIMIT && size && size <= USER_LIMIT - address;
 }
 
+BOOLEAN MmArm64UserCodeAddress(MM_ARM64_USER_SPACE *space, ULONG_PTR pc)
+{
+    PULONG64 pte;
+    return space && space->Root && boot_context(space->Boot) && !(pc & 3) && valid_range(pc, 4) &&
+           NT_SUCCESS(lookup(space, pc, &pte)) && (*pte & (USER_ACCESS | USER_XN)) == USER_ACCESS;
+}
+
 static BOOLEAN mutable_range(ULONG_PTR address, SIZE_T size)
 {
     return valid_range(address, size) && !((address | size) & (PAGE_SIZE - 1)) &&
@@ -246,6 +253,11 @@ NTSTATUS MmArm64UnmapUserPages(MM_ARM64_USER_SPACE *space, ULONG_PTR base, SIZE_
     if (!NT_SUCCESS(status)) return status;
     remove_range(space, space->Root, space->Boot->Tables.StartLevel, 0, base, base + bytes);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS MmArm64ProbeUserRead(MM_ARM64_USER_SPACE *space, ULONG_PTR address, SIZE_T bytes)
+{
+    return check_pages(space, address, bytes, FALSE);
 }
 
 NTSTATUS MmArm64CopyUserBuffer(MM_ARM64_USER_SPACE *space, ULONG_PTR address,
