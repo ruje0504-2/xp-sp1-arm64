@@ -9,6 +9,9 @@ typedef struct {
     ULONG LastInterruptedIrql, LastIntId, LastFailure;
     BOOLEAN Initialized, TimerActive;
 } HAL_ARM64_IRQ_STATS;
+#define HAL_ARM64_BOOT_DEVICE_LEVEL (DISPATCH_LEVEL + 1)
+typedef VOID (*PHAL_ARM64_BOOT_SPI_ROUTINE)(PVOID Context);
+NTSTATUS HalArm64ConnectBootSpi(ULONG Id, ULONG Trigger, PHAL_ARM64_BOOT_SPI_ROUTINE Routine, PVOID Context);
 NTSTATUS HalArm64InitializeGicV2(const HAL_ARM64_BOOT_PLATFORM *Platform);
 NTSTATUS HalArm64InitializePhase1(PLOADER_PARAMETER_BLOCK LoaderBlock);
 NTSTATUS HalArm64StartBootTimer(ULONG Hertz);

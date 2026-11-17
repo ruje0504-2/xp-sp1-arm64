@@ -1,5 +1,5 @@
 /* Resident I/O system PTEs. The whitelist is established by the boot HAL
- * from ACPI and verified against the actual Device translation. */
+ * from ACPI and the boot device tree, verified against the actual Device translation. */
 #include "bootio_private.h"
 
 #define PA_MASK 0x0000fffffffff000ULL
@@ -16,7 +16,7 @@ typedef struct _BOOT_IO_MAPPING {
 } BOOT_IO_MAPPING;
 
 static volatile ULONG64 *io_ptes;
-static BOOT_IO_DEVICE devices[2];
+static BOOT_IO_DEVICE devices[2 + HAL_ARM64_VIRTIO_MMIO_LIMIT];
 static BOOT_IO_MAPPING mappings[MM_BOOT_IO_PAGES];
 
 static ULONG64 mask_exceptions(VOID)
@@ -120,6 +120,15 @@ NTSTATUS MmArm64InitializeBootIo(PXP_ARM64_BOOT_BLOCK block)
     MiInitializeIoTrackers();
     devices[0] = (BOOT_IO_DEVICE){distributor, distributor_pte};
     devices[1] = (BOOT_IO_DEVICE){cpu, cpu_pte};
+    if (NT_SUCCESS(block->VirtioStatus) && block->Virtio.Count <= HAL_ARM64_VIRTIO_MMIO_LIMIT) {
+        ULONG used = 2;
+        for (ULONG i = 0; i < block->Virtio.Count; ++i) {
+            ULONG64 page = block->Virtio.Devices[i].Physical & ~(ULONG64)(PAGE_SIZE - 1);
+            if (lookup_device(page)) continue;
+            ULONG64 pte = device_descriptor(page);
+            if (pte) devices[used++] = (BOOT_IO_DEVICE){page, pte};
+        }
+    }
     io_ptes = block->Tables.IoPtes;
     MiInitializeSystemPtes((PMMPTE)io_ptes, MM_BOOT_IO_PAGES, SystemPteSpace);
     return STATUS_SUCCESS;

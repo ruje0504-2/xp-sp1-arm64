@@ -4,6 +4,7 @@
 #include "../base/boot/arm64/boot.h"
 #include "../base/ntos/ke/arm64/scheduler.h"
 #include "../base/ntos/hal/arm64/gicv2.h"
+#include "../base/ntos/hal/arm64/virtioinput.h"
 #include "../base/ntos/mm/arm64/bootframes_private.h"
 #include "../base/ntos/mm/arm64/bootsyspte.h"
 #include "../base/ntos/mm/arm64/bootimage.h"
@@ -180,9 +181,10 @@ static VOID wait_for_user_delay(MM_ARM64_USER_SPACE *space, ULONG_PTR report, PK
 
 static ULONG callback_unwound;
 
-static NTSTATUS check_win32_callback(ULONG_PTR api, ULONG_PTR cookie, ULONG_PTR unused2, ULONG_PTR unused3,
+static ULONG_PTR check_win32_callback(ULONG_PTR api, ULONG_PTR cookie, ULONG_PTR unused2, ULONG_PTR unused3,
                                     ULONG_PTR unused4, ULONG_PTR unused5, ULONG_PTR unused6, ULONG_PTR unused7,
-                                    ULONG_PTR unused8, ULONG_PTR unused9, ULONG_PTR unused10)
+                                    ULONG_PTR unused8, ULONG_PTR unused9, ULONG_PTR unused10,
+                                    ULONG_PTR unused11, ULONG_PTR unused12, ULONG_PTR unused13, ULONG_PTR unused14)
 {
     UNREFERENCED_PARAMETER(unused2);
     UNREFERENCED_PARAMETER(unused3);
@@ -330,9 +332,11 @@ static VOID check_child_thread(PEPROCESS process, HANDLE process_handle)
     XpTestReport("PASS: nested native Win32 user callbacks and NtCallbackReturn\n");
     HANDLE late;
     CHECK(PsArm64CreateUserThread(process_handle, &start, &late, NULL) == STATUS_PROCESS_IS_TERMINATING && !late);
+    /* The reaper drops its thread reference after retiring the stack. */
+    extern BOOLEAN PsReaperActive;
     ULONGLONG deadline = KeQueryInterruptTime() + 10000000;
     LARGE_INTEGER delay = {.QuadPart = -10000};
-    while (thread->Tcb.InitialStack) {
+    while (thread->Tcb.InitialStack || PsReaperActive) {
         CHECK(KeQueryInterruptTime() < deadline &&
               KeDelayExecutionThread(KernelMode, FALSE, &delay) == STATUS_SUCCESS);
     }
@@ -1810,6 +1814,31 @@ static VOID check_console_desktops(VOID)
     XpTestReport("PASS: resident Win32 window stations, desktop object paths and last-close retirement\n");
 }
 
+static VOID wait_for_input_probe(MM_ARM64_USER_SPACE *space, PETHREAD thread, ULONG_PTR state, ULONG value)
+{
+    ULONGLONG deadline = KeQueryInterruptTime() + 50000000;
+    LARGE_INTEGER poll = {.QuadPart = -10000};
+    for (;;) {
+        ULONG stage;
+        ULONG64 daif;
+        __asm__ volatile("mrs %0, daif\nmsr daifset, #15" : "=r"(daif) :: "memory");
+        CHECK(MmArm64CopyUserBuffer(space, state, &stage, sizeof(stage), FALSE) == STATUS_SUCCESS);
+        __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+        if (stage == value && thread->Tcb.State == Waiting && thread->Tcb.WaitReason == WrUserRequest) break;
+        if (thread->Tcb.State == Terminated || KeQueryInterruptTime() >= deadline) {
+            ULONG step[2];
+            __asm__ volatile("msr daifset, #15" ::: "memory");
+            CHECK(MmArm64CopyUserBuffer(space, state - 80, step, sizeof(step), FALSE) == STATUS_SUCCESS);
+            __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+            XpTestReport("VirtIO probe stopped line="); XpTestHex(step[0]);
+            XpTestReport(" service="); XpTestHex(step[1]); XpTestReport(" stage="); XpTestHex(stage);
+            XpTestReport("\n");
+            CHECK(FALSE);
+        }
+        CHECK(KeDelayExecutionThread(KernelMode, FALSE, &poll) == STATUS_SUCCESS);
+    }
+}
+
 static VOID check_user_console_services(VOID)
 {
     _Static_assert(__builtin_offsetof(TEB, ClientId.UniqueThread) == 0x48, "TEB client ID offset");
@@ -1827,33 +1856,119 @@ static VOID check_user_console_services(VOID)
     for (ULONG i = 0; i < 2; ++i)
         CHECK(ExpArm64CreateDesktop(stations[i], &name, &desktops[i]) == STATUS_SUCCESS);
 
-    HANDLE process_handle, thread_handle;
+    HANDLE process_handle, thread_handle, sender_handle;
     PEPROCESS process;
-    PETHREAD thread;
+    PETHREAD thread, sender;
     CHECK(PsArm64CreateUserProcess(PspInitialSystemProcessHandle, &process_handle) == STATUS_SUCCESS &&
           ObReferenceObjectByHandle(process_handle, SYNCHRONIZE, PsProcessType, KernelMode,
                                     (PVOID *)&process, NULL) == STATUS_SUCCESS);
+    HAL_ARM64_INPUT_STATS input;
+    HalArm64GetInputStats(&input);
+    XpTestReport("VirtIO discovery status="); XpTestHex((ULONG)input.DiscoveryStatus);
+    XpTestReport(" start="); XpTestHex((ULONG)input.StartStatus);
+    XpTestReport(" nodes="); XpTestHex(input.Transports);
+    XpTestReport(" keyboard="); XpTestHex(input.KeyboardIrq);
+    XpTestReport(" mouse="); XpTestHex(input.MouseIrq); XpTestReport("\n");
+    ULONG test_input = input.KeyboardIrq && input.MouseIrq;
     ULONG_PTR entry;
     CHECK(PsArm64InitializeProcessImage(process, XpUserImage, XpUserImageEnd - XpUserImage, 0x90000, &entry) ==
-          STATUS_SUCCESS && PsArm64EnableWin32Services(process) == STATUS_SUCCESS);
+          STATUS_SUCCESS && PsArm64EnableWin32Services(process) == STATUS_SUCCESS &&
+          PsArm64SetUserCallbackDispatcher(process, entry + 24) == STATUS_SUCCESS);
     XP_ARM64_USER_START start = {entry + 20, 0x51000, 0x50000, 0x70000, 0x10000};
+    XP_ARM64_USER_START post = {entry + 28, 0x55000, 0x54000, 0x74000, start.Argument};
     MM_ARM64_USER_SPACE *space = PsArm64UserProcessSpace(process);
     ULONG64 daif;
     __asm__ volatile("mrs %0, daif\nmsr daifset, #15" : "=r"(daif) :: "memory");
     CHECK(MmArm64MapUserPages(space, start.StackLimit, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS &&
-          MmArm64MapUserPages(space, start.Argument, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS);
+          MmArm64MapUserPages(space, post.StackLimit, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS &&
+          MmArm64MapUserPages(space, start.Argument, PAGE_SIZE, PAGE_READWRITE) == STATUS_SUCCESS &&
+          MmArm64CopyUserBuffer(space, start.Argument + 208, &test_input, sizeof(test_input), TRUE) == STATUS_SUCCESS);
     __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
     CHECK(PsArm64CreateUserThread(process_handle, &start, &thread_handle, NULL) == STATUS_SUCCESS &&
           ObReferenceObjectByHandle(thread_handle, SYNCHRONIZE, PsThreadType, KernelMode,
                                     (PVOID *)&thread, NULL) == STATUS_SUCCESS);
     LARGE_INTEGER timeout = {.QuadPart = -20000000};
-    CHECK(KeWaitForSingleObject(&thread->Tcb, Executive, KernelMode, FALSE, &timeout) == STATUS_SUCCESS);
-    ULONG64 result[12] = {0};
+    LARGE_INTEGER poll = {.QuadPart = -10000};
+    const XP_ARM64_BOOT_DISPLAY *display = &CONTAINING_RECORD(KeLoaderBlock, XP_ARM64_BOOT_BLOCK, Nt)->Display;
+    ULONGLONG deadline = KeQueryInterruptTime() + 20000000;
+    ULONG64 result[29] = {0};
     ULONG pixels[12][16];
+    ULONG stage;
+    do {
+        __asm__ volatile("msr daifset, #15" ::: "memory");
+        CHECK(MmArm64CopyUserBuffer(space, start.Argument + 128, &stage, sizeof(stage), FALSE) == STATUS_SUCCESS);
+        __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+        if (stage == 1) break;
+        if (thread->Tcb.State == Terminated || KeQueryInterruptTime() >= deadline) {
+            ULONG step[2];
+            __asm__ volatile("msr daifset, #15" ::: "memory");
+            CHECK(MmArm64CopyUserBuffer(space, start.Argument + 132, step, sizeof(step), FALSE) == STATUS_SUCCESS);
+            __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+            XpTestReport("HWND probe stopped: native probe line="); XpTestHex(step[0]);
+            XpTestReport(" service result="); XpTestHex(step[1]);
+            XpTestReport(" thread exit="); XpTestHex(thread->ExitStatus); XpTestReport("\n");
+            CHECK(FALSE);
+        }
+        CHECK(KeDelayExecutionThread(KernelMode, FALSE, &poll) == STATUS_SUCCESS);
+    } while (TRUE);
+    CHECK(ExpArm64CountUserObjects(process) == 3);
     __asm__ volatile("msr daifset, #15" ::: "memory");
-    CHECK(MmArm64CopyUserBuffer(space, start.Argument, result, sizeof(result), FALSE) == STATUS_SUCCESS &&
-          MmArm64CopyUserBuffer(space, start.Argument + 256, pixels, sizeof(pixels), FALSE) == STATUS_SUCCESS);
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 256, pixels, sizeof(pixels), FALSE) == STATUS_SUCCESS);
     __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    if (display->VirtualBase) {
+        CHECK(display->Width > 270 && display->Height > 76);
+        const volatile ULONG *screen = (const volatile ULONG *)display->VirtualBase;
+        for (ULONG y = 63; y <= 76; ++y) {
+            for (ULONG x = 255; x <= 270; ++x) {
+                ULONG expected = 0;
+                if (x >= 256 && x < 268 && y >= 64 && y < 74)
+                    expected = pixels[y - 63][x - 254];
+                if (x >= 262 && x < 270 && y >= 68 && y < 76)
+                    expected = x == 263 && y == 69 ? 0x00cef84a : 0;
+                if (display->Format == XP_DISPLAY_RGBX)
+                    expected = ((expected & 0xff) << 16) | (expected & 0xff00) | (expected >> 16);
+                CHECK((screen[(SIZE_T)y * display->Stride + x] & 0xffffff) == expected);
+            }
+        }
+        XpTestReport("PASS: live HWND overlap and client clipping match all 224 framebuffer pixels\n");
+    }
+    stage = 2;
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 128, &stage, sizeof(stage), TRUE) == STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    /* The peer doesn't exist yet. The receiver must park in the dispatcher
+     * even though its own queue already contains an unmatched message. */
+    deadline = KeQueryInterruptTime() + 20000000;
+    while (thread->Tcb.State != Waiting || thread->Tcb.WaitReason != WrUserRequest) {
+        CHECK(thread->Tcb.State != Terminated && KeQueryInterruptTime() < deadline &&
+              KeDelayExecutionThread(KernelMode, FALSE, &poll) == STATUS_SUCCESS);
+    }
+    CHECK(thread->Tcb.WaitMode == UserMode);
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 176, &stage, sizeof(stage), FALSE) == STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(stage == 1);
+    CHECK(PsArm64CreateUserThread(process_handle, &post, &sender_handle, NULL) == STATUS_SUCCESS &&
+          ObReferenceObjectByHandle(sender_handle, SYNCHRONIZE, PsThreadType, KernelMode,
+                                    (PVOID *)&sender, NULL) == STATUS_SUCCESS);
+    CHECK(KeWaitForSingleObject(&sender->Tcb, Executive, KernelMode, FALSE, &timeout) == STATUS_SUCCESS &&
+          sender->ExitStatus == 42 && !sender->Tcb.Win32Thread);
+    if (test_input) {
+        wait_for_input_probe(space, thread, start.Argument + 212, 1);
+        XpTestReport("READY: native USER waiting for VirtIO mouse\n");
+        wait_for_input_probe(space, thread, start.Argument + 212, 2);
+        XpTestReport("READY: native USER waiting for VirtIO keyboard\n");
+        timeout.QuadPart = -50000000;
+    }
+    CHECK(KeWaitForSingleObject(&thread->Tcb, Executive, KernelMode, FALSE, &timeout) == STATUS_SUCCESS);
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument, result, sizeof(result), FALSE) == STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    if (thread->ExitStatus != 42) {
+        XpTestReport("USER probe stopped: native probe line="); XpTestHex(result[16] >> 32);
+        XpTestReport(" service result="); XpTestHex((ULONG)result[17]);
+        XpTestReport(" thread exit="); XpTestHex(thread->ExitStatus); XpTestReport("\n");
+    }
     XpTestReport("NtUser console evidence exit="); XpTestHex(thread->ExitStatus);
     XpTestReport(" station="); XpTestHex(result[0]); XpTestReport(" desktop="); XpTestHex(result[2]);
     XpTestReport(" replacement="); XpTestHex(result[4]); XpTestReport(" current="); XpTestHex(result[5]);
@@ -1880,7 +1995,6 @@ static VOID check_user_console_services(VOID)
         XpTestReport("GDI row "); XpTestReport(row); XpTestReport("\n");
     }
     XpTestReport("PASS: native GDI memory DC, 32 bpp pixels, clipped overlap-safe BitBlt and rundown\n");
-    const XP_ARM64_BOOT_DISPLAY *display = &CONTAINING_RECORD(KeLoaderBlock, XP_ARM64_BOOT_BLOCK, Nt)->Display;
     if (display->VirtualBase) {
         CHECK(MmArm64QueryPhysicalAddress(display->PhysicalBase) == ~0ULL &&
               MmArm64QueryPhysicalAddress(display->VirtualBase) == display->PhysicalBase &&
@@ -1892,17 +2006,59 @@ static VOID check_user_console_services(VOID)
         XpTestReport(" format="); XpTestHex(display->Format);
         XpTestReport(" hdc="); XpTestHex(result[10]); XpTestReport("\n");
     } else CHECK(!result[10] && !result[11]);
+    CHECK(result[12] >= 0xc000 && result[13] && result[14] && result[13] != result[14] &&
+          (result[15] >> 32) && (result[15] >> 32) != result[14] &&
+          (ULONG)result[15] == (display->VirtualBase ? 0x0022a5f3 : 0) &&
+          !ExpArm64CountUserObjects(process));
+    XpTestReport("HWND evidence atom="); XpTestHex(result[12]);
+    XpTestReport(" lower="); XpTestHex(result[13]); XpTestReport(" upper="); XpTestHex(result[14]);
+    XpTestReport(" reused="); XpTestHex(result[15] >> 32); XpTestReport(" revealed="); XpTestHex((ULONG)result[15]);
+    XpTestReport("\nPASS: native HWND create, clipped DCs, visibility, handle revocation and exit rundown\n");
+    CHECK((result[18] >> 32) == 2 && (ULONG)result[19] == 1 &&
+          (result[19] >> 32) == 0x4b2e1f && (ULONG)result[20] == 0x674455 &&
+          (result[20] >> 32) == 0x3050f0 && result[21] == 0x1122334455667788ULL);
+    XpTestReport("Paint evidence callbacks="); XpTestHex(result[18] >> 32);
+    XpTestReport(" erases="); XpTestHex((ULONG)result[19]);
+    XpTestReport(" hole="); XpTestHex(result[19] >> 32);
+    XpTestReport(" deferred="); XpTestHex((ULONG)result[20]);
+    XpTestReport(" callback_result="); XpTestHex(result[21]);
+    XpTestReport("\nPASS: native WM_PAINT, disjoint update clipping, nested erase and EndPaint rundown\n");
+    CHECK((ULONG)result[22] == 1 && (result[22] >> 32) == 1 &&
+          (ULONG)result[23] == 0x4422 && (result[23] >> 32) == (ULONG_PTR)thread->Cid.UniqueThread &&
+          result[24] == 0xfeedface11223344ULL && (ULONG)result[25] == 27);
+    XpTestReport("USER queue evidence receiver="); XpTestHex((ULONG_PTR)thread->Cid.UniqueThread);
+    XpTestReport(" sender="); XpTestHex((ULONG_PTR)sender->Cid.UniqueThread);
+    XpTestReport(" wait_reason="); XpTestHex(WrUserRequest);
+    XpTestReport(" dispatch="); XpTestHex(result[24]); XpTestReport(" quit="); XpTestHex((ULONG)result[25]);
+    XpTestReport("\nPASS: native GetMessage blocks, cross-thread posts wake and dispatch, WM_QUIT drains\n");
+    if (test_input) {
+        HalArm64GetInputStats(&input);
+        CHECK(NT_SUCCESS(input.DiscoveryStatus) && NT_SUCCESS(input.StartStatus) &&
+              input.KeyboardIrq != input.MouseIrq && input.KeyboardInterrupts && input.MouseInterrupts &&
+              input.KeyboardEvents >= 2 && input.MouseEvents >= 4 && !input.Faults &&
+              (result[26] >> 32) == 3 && (ULONG)result[27] == 5 &&
+              (result[27] >> 32) == 0x7cab5e && (ULONG)result[28] == 0x4392b1);
+        XpTestReport("VirtIO input evidence key_irq="); XpTestHex(input.KeyboardIrq);
+        XpTestReport(" mouse_irq="); XpTestHex(input.MouseIrq);
+        XpTestReport(" key_interrupts="); XpTestHex(input.KeyboardInterrupts);
+        XpTestReport(" mouse_interrupts="); XpTestHex(input.MouseInterrupts);
+        XpTestReport(" key_records="); XpTestHex(input.KeyboardEvents);
+        XpTestReport(" mouse_records="); XpTestHex(input.MouseEvents);
+        XpTestReport("\nPASS: VirtIO keyboard and mouse IRQs wake native USER, dispatch and paint\n");
+    } else CHECK(!result[26] && !result[27] && !result[28]);
     /* The thread signals before the executive reaper drops its reference.
      * Leave IRQ dispatch active until the kernel stack has been released. */
-    ULONGLONG deadline = KeQueryInterruptTime() + 10000000;
-    LARGE_INTEGER poll = {.QuadPart = -10000};
-    while (thread->Tcb.InitialStack) {
+    deadline = KeQueryInterruptTime() + 10000000;
+    extern BOOLEAN PsReaperActive;
+    while (thread->Tcb.InitialStack || sender->Tcb.InitialStack || PsReaperActive) {
         CHECK(KeQueryInterruptTime() < deadline &&
               KeDelayExecutionThread(KernelMode, FALSE, &poll) == STATUS_SUCCESS);
     }
     ObDereferenceObject(thread);
+    ObDereferenceObject(sender);
     ObDereferenceObject(process);
     CHECK(ObArm64CloseBootObjectHandle(thread_handle) == STATUS_SUCCESS &&
+          ObArm64CloseBootObjectHandle(sender_handle) == STATUS_SUCCESS &&
           ObArm64CloseBootObjectHandle(process_handle) == STATUS_SUCCESS);
     for (ULONG i = 0; i < 2; ++i) {
         CHECK(ObArm64CloseBootObjectHandle(desktops[i]) == STATUS_SUCCESS &&

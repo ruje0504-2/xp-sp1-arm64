@@ -14,6 +14,8 @@ XpChildUserProgram:
     b normal_apc
     b dispatch_callback
     b user_console_program
+    b dispatch_user_window
+    b user_post_program
 start_program:
     mov x19, x0
     adrp x14, initialized_pointer
@@ -392,7 +394,7 @@ user_console_program:
     str x20, [sp, #8]
     mov x0, sp
     mov x1, xzr
-    mov x2, xzr
+    mov w2, #2                /* DESKTOP_CREATEWINDOW */
     call_win32 XP_UserOpenDesktop
     cbz x0, dispatch_failed
     mov x24, x0
@@ -611,15 +613,944 @@ gdi_display_done:
     mov x0, x22
     call_win32 XP_GdiDeleteObjectApp
     cbz w0, dispatch_failed
-    /* Destination DC and selected bitmap are intentionally left to exit rundown. */
+    b user_window_program
+
+/* class + two overlapping popups, client clipping, show/hide and rundown */
+.macro window_call service, source_line
+    mov w9, #\source_line
+    str w9, [x19, #132]
+    call_win32 \service
+    str w0, [x19, #136]
+.endm
+
+user_window_program:
+    sub sp, sp, #224
+    mov x9, #0
+window_zero_stack:
+    str xzr, [sp, x9]
+    add x9, x9, #8
+    cmp x9, #224
+    b.lo window_zero_stack
+    mov w9, #80
+    str w9, [sp, #64]          /* WNDCLASSEX */
+    adr x9, window_procedure
+    str x9, [sp, #72]
+    adrp x9, window_class_name
+    add x9, x9, :lo12:window_class_name
+    str x9, [sp, #128]
+    str x9, [sp, #152]         /* WNDCLASSEX and UNICODE_STRING name */
+    mov w10, #window_class_name_end-window_class_name
+    strh w10, [sp, #144]
+    strh w10, [sp, #146]
+    add x9, sp, #200
+    str x9, [sp, #192]         /* CLSMENUNAME points to empty UNICODE_STRING */
+    mov x0, #0x1000
+    add x1, sp, #144
+    mov x2, x1
+    add x3, sp, #176
+    mov w4, wzr
+    mov w5, #0x80             /* CSF_WIN40COMPAT */
+    mov x6, xzr
+    window_call XP_UserRegisterClassExWOW, __LINE__
+    cbnz w0, dispatch_failed
+    add x0, sp, #64
+    add x1, sp, #144
+    mov x2, x1
+    add x3, sp, #176
+    mov w4, wzr
+    mov w5, #0x80
+    mov x6, xzr
+    window_call XP_UserRegisterClassExWOW, __LINE__
+    cmp w0, #0xc000
+    b.lo dispatch_failed
+    mov w20, w0
+    str x20, [x19, #96]
+    add x0, sp, #64
+    add x1, sp, #144
+    mov x2, x1
+    add x3, sp, #176
+    mov w4, wzr
+    mov w5, #0x80
+    mov x6, xzr
+    window_call XP_UserRegisterClassExWOW, __LINE__
+    cbnz w0, dispatch_failed
+
+    mov x9, #10
+    str x9, [sp]              /* nHeight */
+    mov x9, #1
+    str x9, [sp, #48]         /* pActCtx, fifteenth argument */
+    mov w0, wzr
+    mov w1, w20
+    mov w2, w20
+    mov x3, xzr
+    mov w4, #0x90000000
+    mov w5, #256
+    mov w6, #64
+    mov w7, #12
+    window_call XP_UserCreateWindowEx, __LINE__
+    cbnz w0, dispatch_failed
+    str xzr, [sp, #48]
+    mov w0, wzr
+    mov w1, w20
+    mov w2, w20
+    mov x3, xzr
+    mov w4, #0x90000000
+    mov w5, #256
+    mov w6, #64
+    mov w7, #12
+    window_call XP_UserCreateWindowEx, __LINE__
+    cbz w0, dispatch_failed
+    mov w25, w0
+    str x25, [x19, #104]
+    window_call XP_UserGetDC, __LINE__
+    cbz w0, dispatch_failed
+    mov w27, w0
+
+    mov w9, #0x20
+    movk w9, #0xcc, lsl #16
+    str x9, [sp]
+    mov x0, x27
+    mov w1, #-2
+    mov w2, #-1
+    mov w3, #16
+    mov w4, #12
+    mov x5, x23
+    mov x6, xzr
+    mov x7, xzr
+    window_call XP_GdiBitBlt, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x27
+    mov w1, #12
+    mov w2, #2
+    mov w3, #0xffff
+    window_call XP_GdiSetPixel, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+    mov x0, x27
+    mov w1, #1
+    mov w2, #2
+    window_call XP_GdiGetPixel, __LINE__
+    mov w9, #0x50f0
+    movk w9, #0x30, lsl #16
+    cmp w0, w9                 /* Destination tile at (3,3), after the clipped blit. */
+    b.ne dispatch_failed
+
+    mov x9, #8
+    str x9, [sp]
+    mov w0, wzr
+    mov w1, w20
+    mov w2, w20
+    mov x3, xzr
+    mov w4, #0x80000000
+    mov w5, #262
+    mov w6, #68
+    mov w7, #8
+    window_call XP_UserCreateWindowEx, __LINE__
+    cbz w0, dispatch_failed
+    mov w28, w0
+    str x28, [x19, #112]
+    window_call XP_UserGetDC, __LINE__
+    cbz w0, dispatch_failed
+    mov w24, w0
+    mov x0, x24
+    mov w1, #1
+    mov w2, #1
+    mov w3, #0xf8ce
+    movk w3, #0x4a, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x28
+    mov w1, #5
+    window_call XP_UserShowWindow, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x27
+    mov w1, #7
+    mov w2, #5
+    mov w3, #0xa5f3
+    movk w3, #0x22, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+
+    add x10, x19, #128
+    mov w9, #1
+    stlr w9, [x10]
+window_wait_for_inspection:
+    yield
+    ldar w9, [x10]
+    cmp w9, #2
+    b.ne window_wait_for_inspection
+
+    mov x0, x28
+    mov w1, wzr
+    window_call XP_UserShowWindow, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr x26, [x19, #80]
+    cbz x26, window_no_screen
+    mov x0, x26
+    mov w1, #263
+    mov w2, #69
+    window_call XP_GdiGetPixel, __LINE__
+    mov w9, #0xa5f3
+    movk w9, #0x22, lsl #16
+    cmp w0, w9
+    b.ne dispatch_failed
+    str w0, [x19, #120]
+window_no_screen:
+    mov x0, x24
+    window_call XP_GdiDeleteObjectApp, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x24
+    mov w1, #XP_SFI_RELEASEDC
+    window_call XP_UserCallOneParam, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x24
+    mov w1, #XP_SFI_RELEASEDC
+    window_call XP_UserCallOneParam, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x28
+    window_call XP_UserGetDC, __LINE__
+    cbz w0, dispatch_failed
+    mov w24, w0
+    mov x0, x28
+    mov w1, #0x8055
+    mov x2, xzr
+    mov x3, xzr
+    window_call XP_UserPostMessage, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x28
+    window_call XP_UserDestroyWindow, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x28
+    window_call XP_UserGetDC, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x24
+    mov x1, xzr
+    mov x2, xzr
+    window_call XP_GdiGetPixel, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+    mov x0, x28
+    window_call XP_UserDestroyWindow, __LINE__
+    cbnz w0, dispatch_failed
+
+    bl window_paint_probe
+    bl window_message_probe
+    bl window_input_probe
+    mov x9, #4
+    str x9, [sp]
+    mov w0, wzr
+    mov w1, w20
+    mov w2, w20
+    mov x3, xzr
+    mov w4, #0x90000000
+    mov w5, #-2
+    mov w6, #-2
+    mov w7, #4
+    window_call XP_UserCreateWindowEx, __LINE__
+    cbz w0, dispatch_failed
+    cmp w0, w28
+    b.eq dispatch_failed
+    str w0, [x19, #124]
+    window_call XP_UserGetDC, __LINE__
+    cbz w0, dispatch_failed
+    mov w1, #2
+    mov w2, #2
+    mov w3, #0x1739
+    window_call XP_GdiSetPixel, __LINE__
+    mov w9, #0x1739
+    cmp w0, w9
+    b.ne dispatch_failed
+    cbz x26, window_exit
+    mov x0, x26
+    mov w1, wzr
+    mov w2, wzr
+    window_call XP_GdiGetPixel, __LINE__
+    mov w9, #0x1739
+    cmp w0, w9
+    b.ne dispatch_failed
+window_exit:
+    add sp, sp, #224
+    /* Two windows, their DCs and the class still belong to this thread/process. */
     mov x0, #-2
     mov w1, #42
     mov w8, #XP_SERVICE_TERMINATE_THREAD
     svc #0
     b dispatch_failed
 
+/* The three services below use the same 16-byte RECT and half-open bounds. */
+.macro inval_rect left, top, right, bottom, erase
+    mov w9, #\left
+    mov w10, #\top
+    stp w9, w10, [sp, #48]
+    mov w9, #\right
+    mov w10, #\bottom
+    stp w9, w10, [sp, #56]
+    mov x0, x25
+    add x1, sp, #48
+    mov w2, #\erase
+    window_call XP_UserInvalidateRect, __LINE__
+    cbz w0, dispatch_failed
+.endm
+
+.macro check_paint_rect displacement, left, top, right, bottom
+    ldp w9, w10, [sp, #\displacement]
+    cmp w9, #\left
+    b.ne dispatch_failed
+    cmp w10, #\top
+    b.ne dispatch_failed
+    ldp w9, w10, [sp, #(\displacement + 8)]
+    cmp w9, #\right
+    b.ne dispatch_failed
+    cmp w10, #\bottom
+    b.ne dispatch_failed
+.endm
+
+.macro check_window_pixel dc, x, y, color
+    mov x0, \dc
+    mov w1, #\x
+    mov w2, #\y
+    window_call XP_GdiGetPixel, __LINE__
+    movz w9, #(\color & 0xffff)
+    movk w9, #(\color >> 16), lsl #16
+    cmp w0, w9
+    b.ne dispatch_failed
+.endm
+
+window_paint_probe:
+    sub sp, sp, #96
+    str x30, [sp, #88]
+
+    mov x0, x25
+    mov x1, #0x1000
+    window_call XP_UserBeginPaint, __LINE__
+    cbnz x0, dispatch_failed
+    mov x0, x25
+    add x1, sp, #48
+    mov w2, wzr
+    window_call XP_UserGetUpdateRect, __LINE__
+    cbz w0, dispatch_failed
+    check_paint_rect 48, 0, 0, 12, 10
+    mov x0, x25
+    mov x1, sp
+    window_call XP_UserBeginPaint, __LINE__
+    cbz x0, dispatch_failed
+    check_paint_rect 12, 0, 0, 12, 10
+    mov x0, x25
+    mov x1, sp
+    window_call XP_UserEndPaint, __LINE__
+    cbz w0, dispatch_failed
+
+    mov x0, x27
+    mov w1, #5
+    mov w2, #4
+    mov w3, #0x2e1f
+    movk w3, #0x4b, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x27
+    mov w1, #10
+    mov w2, #9
+    mov w3, #0x2233
+    movk w3, #0x11, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+
+    inval_rect 1, 1, 4, 3, 1
+    inval_rect 7, 5, 9, 8, 0
+    mov x0, x25
+    add x1, sp, #48
+    mov w2, wzr
+    window_call XP_UserGetUpdateRect, __LINE__
+    cbz w0, dispatch_failed
+    check_paint_rect 48, 1, 1, 9, 8
+
+    mov x9, #0x7777
+    str x9, [sp]
+    mov x0, sp
+    mov x1, x25
+    mov w2, #0x20
+    mov w3, #0x20
+    mov w4, #1
+    window_call XP_UserPeekMessage, __LINE__
+    cbnz w0, dispatch_failed
+    ldr x9, [sp]
+    mov x10, #0x7777
+    cmp x9, x10
+    b.ne dispatch_failed
+    mov x0, #0x1000
+    mov x1, x25
+    mov w2, #0xf
+    mov w3, #0xf
+    mov w4, #1
+    window_call XP_UserPeekMessage, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, sp
+    mov x1, x25
+    mov w2, #0xf
+    mov w3, #0xf
+    mov w4, #0x200000
+    window_call XP_UserPeekMessage, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, sp
+    mov x1, x25
+    mov w2, #0xf
+    mov w3, #0xf
+    mov w4, #1
+    window_call XP_UserPeekMessage, __LINE__
+    cbz w0, dispatch_failed
+    ldr x9, [sp]
+    cmp x9, x25
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    cmp w9, #0xf
+    b.ne dispatch_failed
+
+    mov w9, #1
+    str w9, [x19, #144]
+    mov x0, sp
+    window_call XP_UserDispatchMessage, __LINE__
+    movz x9, #0x7788
+    movk x9, #0x5566, lsl #16
+    movk x9, #0x3344, lsl #32
+    movk x9, #0x1122, lsl #48
+    cmp x0, x9
+    b.ne dispatch_failed
+    str x0, [x19, #168]
+
+    check_window_pixel x27, 1, 1, 0x3050f0
+    str w0, [x19, #164]
+    check_window_pixel x27, 5, 4, 0x4b2e1f
+    str w0, [x19, #156]
+    check_window_pixel x27, 7, 5, 0x631450
+    check_window_pixel x27, 10, 9, 0x112233
+    mov x0, x25
+    add x1, sp, #48
+    mov w2, wzr
+    window_call XP_UserGetUpdateRect, __LINE__
+    cbz w0, dispatch_failed
+    check_paint_rect 48, 10, 9, 12, 10
+
+    mov w9, #2
+    str w9, [x19, #144]
+    mov x0, x25
+    mov w1, #XP_SFI_UPDATEWINDOW
+    window_call XP_UserCallHwndLock, __LINE__
+    cbz w0, dispatch_failed
+    check_window_pixel x27, 10, 9, 0x674455
+    str w0, [x19, #160]
+
+    mov x0, x25
+    add x1, sp, #48
+    mov w2, wzr
+    window_call XP_UserGetUpdateRect, __LINE__
+    cbnz w0, dispatch_failed
+    check_paint_rect 48, 0, 0, 0, 0
+    mov x0, x25
+    mov w1, #XP_SFI_UPDATEWINDOW
+    window_call XP_UserCallHwndLock, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, sp
+    mov x1, x25
+    mov w2, wzr
+    mov w3, wzr
+    mov w4, #1
+    window_call XP_UserPeekMessage, __LINE__
+    cbnz w0, dispatch_failed
+
+    cbz x26, paint_probe_done
+    check_window_pixel x26, 261, 68, 0x4b2e1f
+    check_window_pixel x26, 266, 73, 0x674455
+    check_window_pixel x26, 257, 65, 0x3050f0
+paint_probe_done:
+    ldr x30, [sp, #88]
+    add sp, sp, #96
+    ret
+
+#define TEST_WINDOW_MESSAGE 0x8031
+#define TEST_FOLLOWUP_MESSAGE 0x8032
+#define TEST_LOCAL_THREAD_MESSAGE 0x8012
+#define TEST_PEER_THREAD_MESSAGE 0x8013
+
+window_message_probe:
+    sub sp, sp, #64
+    str x30, [sp, #56]
+
+    mov x0, x25
+    mov w1, #0xc                 /* WM_SETTEXT must remain synchronous. */
+    mov x2, xzr
+    mov x3, sp
+    window_call XP_UserPostMessage, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, xzr
+    mov w1, #TEST_LOCAL_THREAD_MESSAGE
+    mov w2, #0x1234
+    mov w3, #0x5678
+    window_call XP_UserPostMessage, __LINE__
+    cbz w0, dispatch_failed
+    ldr w9, [x18, #0x48]
+    str w9, [x19, #188]          /* Receiver TID for the peer's PostThreadMessage. */
+    mov w9, #1
+    add x10, x19, #176
+    stlr w9, [x10]
+    /* There is a live but unmatched thread message in the queue here. */
+    mov x0, sp
+    mov x1, x25
+    mov w2, #TEST_WINDOW_MESSAGE
+    mov w3, #TEST_WINDOW_MESSAGE
+    window_call XP_UserGetMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr x9, [sp]
+    cmp x9, x25
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    mov w10, #TEST_WINDOW_MESSAGE
+    cmp w9, w10
+    b.ne dispatch_failed
+    mov x0, sp
+    window_call XP_UserDispatchMessage, __LINE__
+    movz x9, #0x3344
+    movk x9, #0x1122, lsl #16
+    movk x9, #0xface, lsl #32
+    movk x9, #0xfeed, lsl #48
+    cmp x0, x9
+    b.ne dispatch_failed
+    str x0, [x19, #192]
+
+    add x10, x19, #184
+queue_wait_for_peer:
+    ldar w9, [x10]
+    cbnz w9, queue_peer_ready
+    yield
+    b queue_wait_for_peer
+queue_peer_ready:
+    mov x0, #0x1000             /* Rejected copyout must preserve the post. */
+    mov x1, #-1
+    mov w2, wzr
+    mov w3, wzr
+    mov w4, #1
+    window_call XP_UserPeekMessage, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, sp
+    mov x1, #-1
+    mov w2, wzr
+    mov w3, wzr
+    mov w4, wzr                  /* PM_NOREMOVE and thread-only filter. */
+    window_call XP_UserPeekMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr x9, [sp]
+    cbnz x9, dispatch_failed
+    ldr w9, [sp, #8]
+    mov w10, #TEST_LOCAL_THREAD_MESSAGE
+    cmp w9, w10
+    b.ne dispatch_failed
+
+    mov w0, #27
+    mov w1, #XP_SFI_POSTQUITMESSAGE
+    window_call XP_UserCallOneParam, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, sp
+    mov x1, xzr
+    mov w2, wzr
+    mov w3, wzr
+    window_call XP_UserGetMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    mov w10, #TEST_LOCAL_THREAD_MESSAGE
+    cmp w9, w10
+    b.ne dispatch_failed
+    ldp x9, x10, [sp, #16]
+    mov x11, #0x1234
+    cmp x9, x11
+    b.ne dispatch_failed
+    mov x11, #0x5678
+    cmp x10, x11
+    b.ne dispatch_failed
+    mov x0, sp
+    mov x1, #-1
+    mov w2, wzr
+    mov w3, wzr
+    window_call XP_UserGetMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    mov w10, #TEST_PEER_THREAD_MESSAGE
+    cmp w9, w10
+    b.ne dispatch_failed
+    ldp x9, x10, [sp, #16]
+    mov x11, #0x5152
+    cmp x9, x11
+    b.ne dispatch_failed
+    mov x11, #0x5354
+    cmp x10, x11
+    b.ne dispatch_failed
+    mov x0, sp
+    mov x1, x25
+    mov w2, wzr
+    mov w3, wzr
+    window_call XP_UserGetMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    mov w10, #TEST_FOLLOWUP_MESSAGE
+    cmp w9, w10
+    b.ne dispatch_failed
+    ldr x9, [sp, #16]
+    cmp x9, #43
+    b.ne dispatch_failed
+
+    mov x0, sp
+    mov x1, x25
+    mov w2, #0x9000              /* Synthesize WM_QUIT after posted messages. */
+    mov w3, #0x9000
+    window_call XP_UserGetMessage, __LINE__
+    cbnz w0, dispatch_failed
+    ldr x9, [sp]
+    cbnz x9, dispatch_failed
+    ldr w9, [sp, #8]
+    cmp w9, #0x12
+    b.ne dispatch_failed
+    ldr x9, [sp, #16]
+    cmp x9, #27
+    b.ne dispatch_failed
+    str w9, [x19, #200]
+
+    mov x0, #0x1000
+    mov x1, x25
+    mov w2, wzr
+    mov w3, wzr
+    window_call XP_UserGetMessage, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+    mov x0, sp
+    mov x1, x28                 /* A destroyed HWND must return -1. */
+    mov w2, wzr
+    mov w3, wzr
+    window_call XP_UserGetMessage, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+    ldr x30, [sp, #56]
+    add sp, sp, #64
+    ret
+
+user_post_program:
+    mov x19, x0
+    ldr x0, [x19, #32]
+    call_win32 XP_UserSetThreadDesktop
+    cbz w0, dispatch_failed
+    mov w0, #0x7fff
+    mov w1, #TEST_PEER_THREAD_MESSAGE
+    mov x2, xzr
+    mov x3, xzr
+    call_win32 XP_UserPostThreadMessage
+    cbnz w0, dispatch_failed
+    ldr w0, [x19, #188]
+    mov w1, #TEST_PEER_THREAD_MESSAGE
+    mov w2, #0x5152
+    mov w3, #0x5354
+    call_win32 XP_UserPostThreadMessage
+    cbz w0, dispatch_failed
+    ldr x0, [x19, #104]
+    mov w1, #TEST_WINDOW_MESSAGE
+    movz x2, #0x7788
+    movk x2, #0x5566, lsl #16
+    movk x2, #0x3344, lsl #32
+    movk x2, #0x1122, lsl #48
+    movz x3, #0x3210
+    movk x3, #0x7654, lsl #16
+    movk x3, #0xba98, lsl #32
+    movk x3, #0xfedc, lsl #48
+    call_win32 XP_UserPostMessage
+    cbz w0, dispatch_failed
+    ldr x0, [x19, #104]
+    mov w1, #TEST_FOLLOWUP_MESSAGE
+    mov w2, #43
+    mov x3, xzr
+    call_win32 XP_UserPostMessage
+    cbz w0, dispatch_failed
+    mov w9, #0x4422
+    add x10, x19, #184
+    stlr w9, [x10]
+    mov x0, #-2
+    mov w1, #42
+    mov w8, #XP_SERVICE_TERMINATE_THREAD
+    svc #0
+    b dispatch_failed
+
+window_posted_message:
+    movz x9, #0x7788
+    movk x9, #0x5566, lsl #16
+    movk x9, #0x3344, lsl #32
+    movk x9, #0x1122, lsl #48
+    cmp x2, x9
+    b.ne dispatch_failed
+    movz x9, #0x3210
+    movk x9, #0x7654, lsl #16
+    movk x9, #0xba98, lsl #32
+    movk x9, #0xfedc, lsl #48
+    cmp x3, x9
+    b.ne dispatch_failed
+    ldr w9, [x19, #180]
+    add w9, w9, #1
+    str w9, [x19, #180]
+    movz x0, #0x3344
+    movk x0, #0x1122, lsl #16
+    movk x0, #0xface, lsl #32
+    movk x0, #0xfeed, lsl #48
+    ret
+
+.macro receive_input message, wparam, lparam
+    mov x0, sp
+    mov x1, x25
+    mov w2, #0x100
+    mov w3, #0x202
+    window_call XP_UserGetMessage, __LINE__
+    cmp w0, #1
+    b.ne dispatch_failed
+    ldr x9, [sp]
+    cmp x9, x25
+    b.ne dispatch_failed
+    ldr w9, [sp, #8]
+    cmp w9, #\message
+    b.ne dispatch_failed
+    ldr x9, [sp, #16]
+    cmp x9, #\wparam
+    b.ne dispatch_failed
+    ldr x9, [sp, #24]
+    movz x10, #(\lparam & 0xffff)
+    movk x10, #(\lparam >> 16), lsl #16
+    cmp x9, x10
+    b.ne dispatch_failed
+    ldp w9, w10, [sp, #36]
+    cmp w9, #260
+    b.ne dispatch_failed
+    cmp w10, #68
+    b.ne dispatch_failed
+    mov x0, sp
+    window_call XP_UserDispatchMessage, __LINE__
+    cmp x0, #\message
+    b.ne dispatch_failed
+.endm
+
+window_input_probe:
+    ldr w9, [x19, #208]
+    cbz w9, no_virtio_probe
+    sub sp, sp, #64
+    str x30, [sp, #56]
+    mov w9, #1
+    add x10, x19, #212
+    stlr w9, [x10]
+    receive_input 0x200, 0, 0x00040004
+    receive_input 0x201, 1, 0x00040004
+    receive_input 0x202, 0, 0x00040004
+    mov w9, #2
+    add x10, x19, #212
+    stlr w9, [x10]
+    receive_input 0x100, 0x41, 0x001e0001
+    receive_input 0x101, 0x41, 0xc01e0001
+    check_window_pixel x27, 4, 4, 0x7cab5e
+    str w0, [x19, #220]
+    check_window_pixel x27, 1, 1, 0x4392b1
+    str w0, [x19, #224]
+    check_window_pixel x26, 260, 68, 0x7cab5e
+    check_window_pixel x26, 257, 65, 0x4392b1
+    mov w9, #3
+    str w9, [x19, #212]
+    ldr x30, [sp, #56]
+    add sp, sp, #64
+no_virtio_probe:
+    ret
+
+window_input_message:
+    ldr w9, [x19, #216]
+    add w9, w9, #1
+    str w9, [x19, #216]
+    cmp w1, #0x201
+    b.eq window_click_paint
+    cmp w1, #0x100
+    b.eq window_key_paint
+    mov w0, w1
+    ret
+window_click_paint:
+    mov w3, #0xab5e
+    movk w3, #0x7c, lsl #16
+    mov w1, #4
+    mov w2, #4
+    mov x0, x27
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+    mov w0, #0x201
+    ret
+window_key_paint:
+    mov w3, #0x92b1
+    movk w3, #0x43, lsl #16
+    mov w1, #1
+    mov w2, #1
+    mov x0, x27
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+    mov w0, #0x100
+    ret
+
+/* The port's native callback dispatcher invokes an executable registered
+ * procedure from the fnDWORD record and returns a native CALLBACKSTATUS. */
+dispatch_user_window:
+    cmp w0, #XP_FI_FNDWORD
+    b.ne dispatch_failed
+    cmp w2, #48
+    b.ne dispatch_failed
+    ldr x16, [x1, #40]
+    ldp x2, x3, [x1, #16]
+    ldr x0, [x1]
+    ldr w1, [x1, #8]
+    blr x16
+    sub sp, sp, #32
+    stp x0, xzr, [sp]
+    str xzr, [sp, #16]
+    mov x0, sp
+    mov w1, #24
+    mov w2, wzr
+    mov w8, #XP_SERVICE_CALLBACK_RETURN
+    svc #0
+    b dispatch_failed
+
+window_procedure:
+    cmp x0, x25
+    b.ne dispatch_failed
+    mov w9, #TEST_WINDOW_MESSAGE
+    cmp w1, w9
+    b.eq window_posted_message
+    cmp w1, #0x100
+    b.eq window_input_message
+    cmp w1, #0x101
+    b.eq window_input_message
+    sub w9, w1, #0x200
+    cmp w9, #2
+    b.ls window_input_message
+    cbnz x3, dispatch_failed
+    cmp w1, #0x14
+    b.eq window_erase_background
+    cmp w1, #0xf
+    b.ne dispatch_failed
+    cbnz x2, dispatch_failed
+    sub sp, sp, #128
+    str x30, [sp, #120]
+    ldr w9, [x19, #148]
+    add w9, w9, #1
+    str w9, [x19, #148]
+    mov x1, sp
+    window_call XP_UserBeginPaint, __LINE__
+    cbz x0, dispatch_failed
+    str x0, [sp, #80]
+    ldr w9, [sp, #8]             /* The erase callback handled the background. */
+    cbnz w9, dispatch_failed
+    ldr w9, [x19, #144]
+    cmp w9, #2
+    b.eq paint_second_update
+    check_paint_rect 12, 1, 1, 9, 8
+
+    ldr x0, [sp, #80]
+    mov w1, #XP_SFI_RELEASEDC
+    window_call XP_UserCallOneParam, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x25
+    add x1, sp, #80
+    window_call XP_UserBeginPaint, __LINE__
+    cbnz x0, dispatch_failed
+    ldr x0, [sp, #80]
+    mov w1, #5
+    mov w2, #4
+    mov w3, #0xffff
+    window_call XP_GdiSetPixel, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+
+    ldr x0, [sp, #80]
+    sub sp, sp, #32
+    mov w9, #0x20
+    movk w9, #0xcc, lsl #16
+    stp x9, xzr, [sp]
+    str xzr, [sp, #16]
+    mov x1, xzr
+    mov x2, xzr
+    mov w3, #12
+    mov w4, #10
+    mov x5, x23
+    mov x6, xzr
+    mov x7, xzr
+    window_call XP_GdiBitBlt, __LINE__
+    cbz w0, dispatch_failed
+    add sp, sp, #32
+    ldr x0, [sp, #80]
+    mov w1, #7
+    mov w2, #5
+    mov w3, #0x1450
+    movk w3, #0x63, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+    b finish_window_paint
+
+paint_second_update:
+    check_paint_rect 12, 10, 9, 12, 10
+    ldr x0, [sp, #80]
+    mov w1, #10
+    mov w2, #9
+    mov w3, #0x4455
+    movk w3, #0x67, lsl #16
+    window_call XP_GdiSetPixel, __LINE__
+    cbz w0, dispatch_failed
+
+finish_window_paint:
+    mov x0, x25
+    mov x1, #0x1000
+    window_call XP_UserEndPaint, __LINE__
+    cbnz w0, dispatch_failed
+    mov x0, x25
+    mov x1, sp
+    window_call XP_UserEndPaint, __LINE__
+    cbz w0, dispatch_failed
+    ldr x0, [sp, #80]
+    mov w1, #1
+    mov w2, #1
+    window_call XP_GdiGetPixel, __LINE__
+    cmn w0, #1
+    b.ne dispatch_failed
+    ldr x30, [sp, #120]
+    add sp, sp, #128
+    movz x0, #0x7788
+    movk x0, #0x5566, lsl #16
+    movk x0, #0x3344, lsl #32
+    movk x0, #0x1122, lsl #48
+    ret
+
+window_erase_background:
+    sub sp, sp, #80
+    str x30, [sp, #72]
+    ldr w9, [x19, #152]
+    add w9, w9, #1
+    str w9, [x19, #152]
+    mov x0, x2
+    mov w1, #1
+    mov w2, #1
+    mov w3, #0x8888
+    window_call XP_GdiSetPixel, __LINE__
+    mov w9, #0x8888
+    cmp w0, w9
+    b.ne dispatch_failed
+    inval_rect 10, 9, 12, 10, 0
+    ldr x30, [sp, #72]
+    add sp, sp, #80
+    mov w0, #1
+    ret
+
 .section .rdata,"dr"
 .p2align 1
+window_class_name:
+    .short 'A','r','m','6','4','R','a','s','t','e','r'
+window_class_name_end:
 console_path:
     .short 92, 'W','i','n','d','o','w','s',92,'W','i','n','d','o','w','S','t','a','t','i','o','n','s',92
     .short 'w','i','n','s','t','a','0'

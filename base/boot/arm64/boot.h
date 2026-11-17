@@ -8,7 +8,7 @@
 #include "time.h"
 #include "bootimage.h"
 #include "../../ntos/mm/arm64/bootmap.h"
-#define XP_ARM64_BOOT_VERSION 15
+#define XP_ARM64_BOOT_VERSION 16
 #define XP_ARM64_NATIVE_LOAD_OPTIONS "NOGUIBOOT"
 #define XP_ARM64_BOOT_MAP_CAPACITY 65536
 #define XP_ARM64_BOOT_DESCRIPTOR_CAPACITY 1024
@@ -38,6 +38,8 @@ typedef struct _XP_ARM64_BOOT_BLOCK {
     NTSTATUS PlatformStatus;
     NTSTATUS HalStatus;
     HAL_ARM64_BOOT_PLATFORM Platform;
+    NTSTATUS VirtioStatus;
+    HAL_ARM64_VIRTIO_BUS Virtio;
     XP_ARM64_BOOT_TIME Time;
     XP_ARM64_BOOT_DISPLAY Display;
     ULONG64 StackBase;

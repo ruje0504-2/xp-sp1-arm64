@@ -1,3 +1,5 @@
+#include "../../hal/arm64/virtioinput.h"
+
 /* Resident console objects follow the XP window station / desktop container
  * relationship. Their object-manager methods run from the shared kernel map. */
 typedef struct {
@@ -187,6 +189,7 @@ NTSTATUS ExpArm64InitializeWin32Console(VOID)
     initialize_console_display();
     windows_directory = parent;
     station_directory = directory;
+    HalArm64InitializeVirtioInput();
 
 done:
     ExReleasePushLockExclusive(&console_start_lock);

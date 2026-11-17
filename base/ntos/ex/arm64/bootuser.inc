@@ -2,6 +2,7 @@
 #include "../../ps/arm64/bootprocess.h"
 #include "xp-token.h"
 #include "xp-win32-services.h"
+#include "xp-win32-postable.h"
 
 typedef struct {
     HANDLE StationHandle;
@@ -10,10 +11,36 @@ typedef struct {
     LIST_ENTRY Threads;
 } ARM64_USER_PROCESS;
 
+#define USER_QUEUE_LIMIT 64
+#define USER_WM_QUIT 0x0012u
+
+typedef struct {
+    ULONG_PTR Window;
+    ULONG Message;
+    ULONG_PTR WParam, LParam;
+    ULONG Time;
+    LONG X, Y;
+} ARM64_USER_MSG;
+
+typedef struct {
+    ARM64_USER_MSG Message;
+    ULONG Category;
+} ARM64_QUEUE_ENTRY;
+
+_Static_assert(sizeof(ARM64_USER_MSG) == 48 && FIELD_OFFSET(ARM64_USER_MSG, WParam) == 16,
+               "native MSG");
+
 typedef struct {
     LIST_ENTRY Link;
     HANDLE DesktopHandle;
+    ACCESS_MASK DesktopAccess;
+    ULONG WindowCount;
     ARM64_CONSOLE_DESKTOP *Desktop;
+    PEPROCESS_QUOTA_BLOCK Quota;
+    KEVENT QueueEvent;
+    ARM64_QUEUE_ENTRY Messages[USER_QUEUE_LIMIT];
+    ULONG MessageCount, PostedCount, QuitCode;
+    BOOLEAN QuitPosted;
 } ARM64_USER_THREAD;
 
 static EX_PUSH_LOCK binding_lock;
@@ -60,6 +87,7 @@ VOID ExpArm64ReleaseWin32Bindings(PETHREAD thread, BOOLEAN last)
     KeLeaveCriticalRegion();
     if (user_thread) {
         ObDereferenceObject(user_thread->Desktop);
+        PsReturnSharedPoolQuota(user_thread->Quota, 0, sizeof(*user_thread));
         ExFreePool(user_thread);
     }
     if (user_process) {
@@ -251,27 +279,37 @@ static BOOLEAN bind_thread_desktop(HANDLE handle)
     PKTHREAD current = KeGetCurrentThread();
     if (!user) return FALSE;
     ARM64_CONSOLE_DESKTOP *desktop;
+    OBJECT_HANDLE_INFORMATION info;
     NTSTATUS status = ObReferenceObjectByHandle(handle, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS,
-                                                ExDesktopObjectType, UserMode, (PVOID *)&desktop, NULL);
+                                                ExDesktopObjectType, UserMode, (PVOID *)&desktop, &info);
     if (!NT_SUCCESS(status)) return FALSE;
-    if (desktop->Station != user->Station) {
+    ARM64_USER_THREAD *thread = current->Win32Thread;
+    if (desktop->Station != user->Station || (thread && thread->WindowCount && thread->Desktop != desktop)) {
         ObDereferenceObject(desktop);
         return FALSE;
     }
-    ARM64_USER_THREAD *thread = current->Win32Thread;
     if (!thread) {
-        thread = ExAllocatePoolWithTag(NonPagedPool, sizeof(*thread), 'tUsW');
-        if (!thread) {
+        PEPROCESS_QUOTA_BLOCK quota = PsChargeSharedPoolQuota(PsGetCurrentProcess(), 0, sizeof(*thread));
+        if (!quota) {
             ObDereferenceObject(desktop);
             return FALSE;
         }
-        thread->Desktop = NULL;
+        thread = ExAllocatePoolWithTag(NonPagedPool, sizeof(*thread), 'tUsW');
+        if (!thread) {
+            PsReturnSharedPoolQuota(quota, 0, sizeof(*thread));
+            ObDereferenceObject(desktop);
+            return FALSE;
+        }
+        RtlZeroMemory(thread, sizeof(*thread));
+        thread->Quota = quota;
+        KeInitializeEvent(&thread->QueueEvent, NotificationEvent, FALSE);
         InsertTailList(&user->Threads, &thread->Link);
         current->Win32Thread = thread;
     }
     ARM64_CONSOLE_DESKTOP *old = thread->Desktop;
     thread->Desktop = desktop;
     thread->DesktopHandle = handle;
+    thread->DesktopAccess = info.GrantedAccess;
     if (old) ObDereferenceObject(old);
     return TRUE;
 }
@@ -292,18 +330,19 @@ static HANDLE query_thread_desktop(ULONG tid)
  * adapters use the register ABI of the existing Win32 service table. */
 #define WIN32_ARGS ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, \
                    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h, \
-                   ULONG_PTR i, ULONG_PTR j, ULONG_PTR k
-static NTSTATUS user_open_station(WIN32_ARGS)
+                   ULONG_PTR i, ULONG_PTR j, ULONG_PTR k, ULONG_PTR l, \
+                   ULONG_PTR m, ULONG_PTR n, ULONG_PTR o
+static ULONG_PTR user_open_station(WIN32_ARGS)
 {
     return (ULONG_PTR)open_console_object(a, (ACCESS_MASK)b, FALSE);
 }
 
-static NTSTATUS user_open_desktop(WIN32_ARGS)
+static ULONG_PTR user_open_desktop(WIN32_ARGS)
 {
     return b ? 0 : (ULONG_PTR)open_console_object(a, (ACCESS_MASK)c, TRUE);
 }
 
-static NTSTATUS user_set_station(WIN32_ARGS)
+static ULONG_PTR user_set_station(WIN32_ARGS)
 {
     KeEnterCriticalRegion();
     ExAcquirePushLockExclusive(&binding_lock);
@@ -313,7 +352,7 @@ static NTSTATUS user_set_station(WIN32_ARGS)
     return result;
 }
 
-static NTSTATUS user_get_station(WIN32_ARGS)
+static ULONG_PTR user_get_station(WIN32_ARGS)
 {
     KeEnterCriticalRegion();
     ExAcquirePushLockShared(&binding_lock);
@@ -324,7 +363,7 @@ static NTSTATUS user_get_station(WIN32_ARGS)
     return (ULONG_PTR)handle;
 }
 
-static NTSTATUS user_set_desktop(WIN32_ARGS)
+static ULONG_PTR user_set_desktop(WIN32_ARGS)
 {
     KeEnterCriticalRegion();
     ExAcquirePushLockExclusive(&binding_lock);
@@ -334,7 +373,7 @@ static NTSTATUS user_set_desktop(WIN32_ARGS)
     return result;
 }
 
-static NTSTATUS user_get_desktop(WIN32_ARGS)
+static ULONG_PTR user_get_desktop(WIN32_ARGS)
 {
     KeEnterCriticalRegion();
     ExAcquirePushLockShared(&binding_lock);
@@ -344,12 +383,12 @@ static NTSTATUS user_get_desktop(WIN32_ARGS)
     return (ULONG_PTR)handle;
 }
 
-static NTSTATUS user_close_station(WIN32_ARGS)
+static ULONG_PTR user_close_station(WIN32_ARGS)
 {
     return NT_SUCCESS(ExpArm64CloseUserHandle((HANDLE)a, ExWindowStationObjectType));
 }
 
-static NTSTATUS user_close_desktop(WIN32_ARGS)
+static ULONG_PTR user_close_desktop(WIN32_ARGS)
 {
     return NT_SUCCESS(ExpArm64CloseUserHandle((HANDLE)a, ExDesktopObjectType));
 }
@@ -374,10 +413,26 @@ static PKARM64_WIN32_SERVICE user_services[] = {
     [XP_GdiDeleteObjectApp - 0x1000] = gdi_delete_object,
     [XP_GdiBitBlt - 0x1000] = gdi_bitblt,
     [XP_UserGetDC - 0x1000] = user_get_dc,
+    [XP_UserRegisterClassExWOW - 0x1000] = user_register_class,
+    [XP_UserCreateWindowEx - 0x1000] = user_create_window,
+    [XP_UserDestroyWindow - 0x1000] = user_destroy_window,
+    [XP_UserShowWindow - 0x1000] = user_show_window,
+    [XP_UserCallOneParam - 0x1000] = user_call_one_param,
+    [XP_UserInvalidateRect - 0x1000] = user_invalidate_rect,
+    [XP_UserGetUpdateRect - 0x1000] = user_get_update_rect,
+    [XP_UserBeginPaint - 0x1000] = user_begin_paint,
+    [XP_UserEndPaint - 0x1000] = user_end_paint,
+    [XP_UserPeekMessage - 0x1000] = user_peek_message,
+    [XP_UserGetMessage - 0x1000] = user_get_message,
+    [XP_UserPostMessage - 0x1000] = user_post_message,
+    [XP_UserPostThreadMessage - 0x1000] = user_post_thread_message,
+    [XP_UserDispatchMessage - 0x1000] = user_dispatch_message,
+    [XP_UserCallHwndLock - 0x1000] = user_call_hwnd_lock,
 };
 
 static UCHAR user_service_arguments[sizeof(user_services) / sizeof(user_services[0])] = {
     [XP_GdiBitBlt - 0x1000] = 11,
+    [XP_UserCreateWindowEx - 0x1000] = 15,
 };
 
 static BOOLEAN register_console_services(VOID)

@@ -10,6 +10,13 @@ static HAL_ARM64_BOOT_PLATFORM platform;
 static volatile HAL_ARM64_IRQ_STATS stats;
 static volatile BOOLEAN profile_time;
 static ULONG64 deadline;
+static ULONG gic_lines, gic_cpus;
+typedef struct {
+    PHAL_ARM64_BOOT_SPI_ROUTINE Routine;
+    PVOID Context;
+    ULONG Id;
+} HAL_ARM64_BOOT_SPI;
+static HAL_ARM64_BOOT_SPI spi_handlers[4];
 #define GICD_SGIR 0xf00
 #define GICD_SGIR_SELF (2u << 24)
 /* The local SGIs use INTIDs equal to their software interrupt levels. */
@@ -96,6 +103,54 @@ VOID KeLowerIrql(KIRQL level)
 }
 KIRQL KeRaiseIrqlToDpcLevel(VOID) { KIRQL old;KeRaiseIrql(DISPATCH_LEVEL,&old);return old; }
 KIRQL KeRaiseIrqlToSynchLevel(VOID) { KIRQL old;KeRaiseIrql(SYNCH_LEVEL,&old);return old; }
+static VOID write_field(ULONG offset, ULONG mask, ULONG bits)
+{
+    write32(platform.GicDistributor, offset, (read32(platform.GicDistributor, offset) & ~mask) | bits);
+}
+
+NTSTATUS HalArm64ConnectBootSpi(ULONG id, ULONG trigger, PHAL_ARM64_BOOT_SPI_ROUTINE routine, PVOID context)
+{
+    if (!stats.Initialized || KeGetCurrentIrql() != PASSIVE_LEVEL || !routine ||
+        id < 32 || id >= gic_lines || id >= 1020 || (trigger != 1 && trigger != 4))
+        return STATUS_INVALID_PARAMETER;
+    ULONG64 saved = mask_irq();
+    HAL_ARM64_BOOT_SPI *slot = NULL;
+    for (ULONG i = 0; i < (sizeof(spi_handlers) / sizeof(spi_handlers[0])); ++i) {
+        if (spi_handlers[i].Routine && spi_handlers[i].Id == id) {
+            restore_irq(saved);
+            return STATUS_DEVICE_BUSY;
+        }
+        if (!spi_handlers[i].Routine && !slot) slot = &spi_handlers[i];
+    }
+    ULONG bit = 1u << (id % 32), bank = (id / 32) * 4;
+    /* CPU targets are read-as-zero/write-ignored on a UP GICv2. */
+    ULONG target = gic_cpus > 1 ? read32(platform.GicDistributor, 0x800) & 0xff : 0;
+    if (!slot || (gic_cpus > 1 && (!target || (target & (target - 1)))) ||
+        (read32(platform.GicDistributor, 0x300 + bank) & bit)) {
+        restore_irq(saved);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    write32(platform.GicDistributor, 0x180 + bank, bit);
+    write32(platform.GicDistributor, 0x280 + bank, bit);
+    ULONG shift = (id & 3) * 8, target_word = 0x800 + (id & ~3u);
+    ULONG priority_word = 0x400 + (id & ~3u);
+    if (target) write_field(target_word, 0xffu << shift, target << shift);
+    write_field(priority_word, 0xffu << shift, priority(HAL_ARM64_BOOT_DEVICE_LEVEL) << shift);
+    ULONG mode = 0xc00 + (id / 16) * 4, edge = 2u << ((id % 16) * 2);
+    write_field(mode, edge, trigger == 1 ? edge : 0);
+    if (((read32(platform.GicDistributor, mode) & edge) != (trigger == 1 ? edge : 0)) ||
+        (target && ((read32(platform.GicDistributor, target_word) >> shift) & 255) != target) ||
+        ((read32(platform.GicDistributor, priority_word) >> shift) & 255) != priority(HAL_ARM64_BOOT_DEVICE_LEVEL)) {
+        restore_irq(saved);
+        return STATUS_NOT_SUPPORTED;
+    }
+    *slot = (HAL_ARM64_BOOT_SPI){routine, context, id};
+    write32(platform.GicDistributor, 0x100 + bank, bit);
+    restore_irq(saved);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS HalArm64InitializeGicV2(const HAL_ARM64_BOOT_PLATFORM *input)
 {
     ULONG64 daif;
@@ -158,6 +213,8 @@ NTSTATUS HalArm64InitializeGicV2(const HAL_ARM64_BOOT_PLATFORM *input)
     ULONG64 frequency;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
     stats.Frequency=frequency;
+    gic_lines = banks * 32;
+    gic_cpus = ((typer >> 5) & 7) + 1;
     stats.Initialized=TRUE;
     if (!frequency || HalArm64ReadPriorityMask()!=0) fatal(4);
     return STATUS_SUCCESS;
@@ -286,6 +343,20 @@ BOOLEAN HalArm64HandleBootIrq(PKTRAP_FRAME frame)
             KeLowerIrql(old);
         }
         return TRUE;
+    }
+    if (id >= 32) {
+        for (ULONG i = 0; i < (sizeof(spi_handlers) / sizeof(spi_handlers[0])); ++i) {
+            const HAL_ARM64_BOOT_SPI *slot = &spi_handlers[i];
+            if (!slot->Routine || slot->Id != id) continue;
+            KIRQL previous;
+            if (old >= HAL_ARM64_BOOT_DEVICE_LEVEL) fatal(8);
+            KeRaiseIrql(HAL_ARM64_BOOT_DEVICE_LEVEL, &previous);
+            if (previous != old) fatal(8);
+            slot->Routine(slot->Context);
+            write32(platform.GicCpuInterface, 0x10, acknowledge);
+            KeLowerIrql(old);
+            return TRUE;
+        }
     }
     if (id!=platform.TimerIrq || !stats.TimerActive) {
         write32(platform.GicDistributor,0x180+(id/32)*4,1u<<(id%32));

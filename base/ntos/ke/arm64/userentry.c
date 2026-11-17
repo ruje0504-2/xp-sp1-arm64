@@ -286,32 +286,33 @@ static NTSTATUS callback_return(KARM64_USER_ENTRY *entry)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS dispatch_win32_service(MM_ARM64_USER_SPACE *space, const KTRAP_FRAME *frame)
+static ULONG_PTR dispatch_win32_service(MM_ARM64_USER_SPACE *space, const KTRAP_FRAME *frame)
 {
     PKTHREAD thread = KeGetCurrentThread();
     if (thread->ServiceTable != &KeServiceDescriptorTableShadow[0] || thread->TrapFrame != frame)
-        return STATUS_INVALID_SYSTEM_SERVICE;
+        return (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
     const KSERVICE_TABLE_DESCRIPTOR *table = &KeServiceDescriptorTableShadow[WIN32K_SERVICE_INDEX];
     ULONG index = (ULONG)frame->X[8] & SERVICE_NUMBER_MASK;
     if (!table->Base || index >= table->Limit || !table->Base[index])
-        return STATUS_INVALID_SYSTEM_SERVICE;
-    ULONG_PTR tail[3] = {0};
+        return (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
+    ULONG_PTR tail[7] = {0};
     ULONG arguments = table->Number ? table->Number[index] : 8;
-    if (arguments > 11) return STATUS_INVALID_SYSTEM_SERVICE;
+    if (arguments > 8 + sizeof(tail) / sizeof(tail[0])) return (ULONG)STATUS_INVALID_SYSTEM_SERVICE;
     if (arguments > 8) {
         ULONG64 daif;
         __asm__ volatile("mrs %0, daif\nmsr daifset, #15" : "=r"(daif) :: "memory");
         NTSTATUS status = MmArm64CopyUserBuffer(space, frame->Sp, tail, (arguments - 8) * sizeof(tail[0]), FALSE);
         __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
-        if (!NT_SUCCESS(status)) return STATUS_ACCESS_VIOLATION;
+        if (!NT_SUCCESS(status)) return (ULONG)STATUS_ACCESS_VIOLATION;
     }
     PKARM64_WIN32_SERVICE service = (PKARM64_WIN32_SERVICE)table->Base[index];
     KPROCESSOR_MODE previous = thread->PreviousMode;
     thread->PreviousMode = UserMode;
-    NTSTATUS status = service(frame->X[0], frame->X[1], frame->X[2], frame->X[3],
-                              frame->X[4], frame->X[5], frame->X[6], frame->X[7], tail[0], tail[1], tail[2]);
+    ULONG_PTR result = service(frame->X[0], frame->X[1], frame->X[2], frame->X[3],
+                              frame->X[4], frame->X[5], frame->X[6], frame->X[7], tail[0], tail[1], tail[2],
+                              tail[3], tail[4], tail[5], tail[6]);
     thread->PreviousMode = previous;
-    return status;
+    return result;
 }
 
 NTSTATUS KiArm64UserService(MM_ARM64_USER_SPACE *space, KARM64_USER_ENTRY *entry)
@@ -333,7 +334,8 @@ NTSTATUS KiArm64UserService(MM_ARM64_USER_SPACE *space, KARM64_USER_ENTRY *entry
         }
         status = target ? STATUS_NOT_SUPPORTED : STATUS_CANT_TERMINATE_SELF;
     } else if ((frame->X[8] >> 12) == WIN32K_SERVICE_INDEX) {
-        status = dispatch_win32_service(space, frame);
+        frame->X[0] = dispatch_win32_service(space, frame);
+        return STATUS_SUCCESS;
     } else if (frame->X[8] == XP_SERVICE_CLOSE && entry->Space) {
         status = ExpArm64CloseUserHandle((HANDLE)frame->X[0], NULL);
     } else if (frame->X[8] == XP_SERVICE_CONTINUE) {

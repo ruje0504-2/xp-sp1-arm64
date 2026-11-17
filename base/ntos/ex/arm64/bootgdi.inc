@@ -7,6 +7,17 @@
 #define GDI_CLR_INVALID 0xffffffffu
 
 typedef enum { GdiMemoryDc = 1, GdiBitmap = 5 } ARM64_GDI_TYPE;
+typedef struct _ARM64_USER_WINDOW ARM64_USER_WINDOW;
+
+typedef struct {
+    LONG Left, Top, Right, Bottom;
+} ARM64_USER_RECT;
+
+typedef struct {
+    RTL_BITMAP Bits;
+    ARM64_USER_RECT Bounds;
+    BOOLEAN Erase;
+} ARM64_PAINT_REGION;
 
 typedef struct {
     LONG Width, Height;
@@ -18,13 +29,17 @@ typedef struct {
     ULONG BitmapHandle;
     ARM64_GDI_BITMAP *Bitmap;
     PKTHREAD DisplayOwner;
-    BOOLEAN ReadScreen;
+    ARM64_CONSOLE_DESKTOP *Desktop;
+    ARM64_USER_WINDOW *Window;
+    BOOLEAN ReadScreen, Paint;
 } ARM64_GDI_DC;
 
 typedef struct {
     PULONG Pixels;
     LONG Width, Height, Stride;
     BOOLEAN Rgbx, Display;
+    ARM64_USER_WINDOW *Window;
+    const ARM64_PAINT_REGION *Clip;
 } ARM64_GDI_RASTER;
 
 typedef struct {
@@ -126,9 +141,38 @@ static VOID gdi_free(ARM64_GDI_ENTRY *entry)
     entry->Owner = NULL;
 }
 
+static ULONG swap_red_blue(ULONG color)
+{
+    return ((color & 0xffu) << 16) | (color & 0xff00u) | ((color >> 16) & 0xffu);
+}
+
+static ULONG acquire_user_dc(PKTHREAD thread, ARM64_CONSOLE_DESKTOP *desktop,
+                            ARM64_USER_WINDOW *window, BOOLEAN read_screen, BOOLEAN paint)
+{
+    ARM64_GDI_DC *dc;
+    ULONG handle = gdi_allocate(GdiMemoryDc, sizeof(*dc), (PVOID *)&dc);
+    if (handle) {
+        dc->DisplayOwner = thread;
+        dc->Desktop = desktop;
+        dc->Window = window;
+        dc->ReadScreen = read_screen;
+        dc->Paint = paint;
+    }
+    return handle;
+}
+
+static VOID discard_window_posts(ARM64_USER_THREAD *thread, ULONG_PTR hwnd);
+
+#include "bootwindow.inc"
+#include "bootpaint.inc"
+#include "bootmsg.inc"
+#include "bootinput.inc"
+
 VOID ExpArm64ReleaseGdiObjects(PEPROCESS process)
 {
     gdi_enter();
+    for (ULONG slot = 0; slot < USER_CLASS_LIMIT; ++slot)
+        if (user_classes[slot].Owner == process) user_classes[slot].Owner = NULL;
     /* Release selection references before freeing any bitmaps. */
     for (ULONG slot = 0; slot < GDI_SLOT_COUNT; ++slot) {
         ARM64_GDI_ENTRY *entry = &gdi_objects[slot];
@@ -141,9 +185,11 @@ VOID ExpArm64ReleaseGdiObjects(PEPROCESS process)
     gdi_leave();
 }
 
-VOID ExpArm64ReleaseThreadDisplayDcs(PKTHREAD thread)
+VOID ExpArm64ReleaseThreadUserObjects(PKTHREAD thread)
 {
     gdi_enter();
+    for (ULONG slot = 0; slot < USER_WINDOW_LIMIT; ++slot)
+        if (user_windows[slot].Owner == thread) window_destroy(&user_windows[slot]);
     for (ULONG slot = 0; slot < GDI_SLOT_COUNT; ++slot) {
         ARM64_GDI_ENTRY *entry = &gdi_objects[slot];
         if (entry->Owner && entry->Type == GdiMemoryDc &&
@@ -163,7 +209,19 @@ ULONG ExpArm64CountGdiObjects(PEPROCESS process)
     return count;
 }
 
-static NTSTATUS gdi_create_bitmap(WIN32_ARGS)
+ULONG ExpArm64CountUserObjects(PEPROCESS process)
+{
+    ULONG count = 0;
+    gdi_enter();
+    for (ULONG slot = 0; slot < USER_CLASS_LIMIT; ++slot)
+        count += user_classes[slot].Owner == process;
+    for (ULONG slot = 0; slot < USER_WINDOW_LIMIT; ++slot)
+        count += user_windows[slot].Owner && ((PETHREAD)user_windows[slot].Owner)->ThreadsProcess == process;
+    gdi_leave();
+    return count;
+}
+
+static ULONG_PTR gdi_create_bitmap(WIN32_ARGS)
 {
     LONG width = (LONG)a, height = (LONG)b;
     if (width <= 0 || height <= 0 || (ULONG)c != 1 || (ULONG)d != 32) return 0;
@@ -186,7 +244,7 @@ static NTSTATUS gdi_create_bitmap(WIN32_ARGS)
     return handle;
 }
 
-static NTSTATUS gdi_create_dc(WIN32_ARGS)
+static ULONG_PTR gdi_create_dc(WIN32_ARGS)
 {
     gdi_enter();
     ARM64_GDI_DC *dc;
@@ -196,7 +254,7 @@ static NTSTATUS gdi_create_dc(WIN32_ARGS)
     return handle;
 }
 
-static NTSTATUS gdi_select_bitmap(WIN32_ARGS)
+static ULONG_PTR gdi_select_bitmap(WIN32_ARGS)
 {
     ULONG previous = 0;
     gdi_enter();
@@ -217,30 +275,38 @@ static NTSTATUS gdi_select_bitmap(WIN32_ARGS)
     return previous;
 }
 
-static NTSTATUS user_get_dc(WIN32_ARGS)
+static ULONG_PTR user_get_dc(WIN32_ARGS)
 {
-    /* NtUserGetDC(NULL) acquires a DC for the attached interactive desktop. */
-    if (a || !boot_display()->VirtualBase) return 0;
     PKTHREAD thread = KeGetCurrentThread();
     KeEnterCriticalRegion();
     ExAcquirePushLockShared(&binding_lock);
     ARM64_USER_THREAD *user = thread->Win32Thread;
     ARM64_USER_PROCESS *process = PsGetCurrentProcess()->Win32Process;
-    BOOLEAN interactive = user && process && user->Desktop->Station->Interactive;
-    BOOLEAN read_screen = interactive && (process->StationAccess & WINSTA_READSCREEN);
+    ARM64_CONSOLE_DESKTOP *desktop = user ? user->Desktop : NULL;
+    BOOLEAN screen = !a && desktop && process && desktop_is_presented(desktop) && boot_display()->VirtualBase;
+    BOOLEAN read_screen = screen && (process->StationAccess & WINSTA_READSCREEN);
     ExReleasePushLockShared(&binding_lock);
     KeLeaveCriticalRegion();
-    if (!interactive) return 0;
+    if (!desktop || (!a && !screen)) return 0;
 
     gdi_enter();
-    ARM64_GDI_DC *dc;
-    ULONG handle = gdi_allocate(GdiMemoryDc, sizeof(*dc), (PVOID *)&dc);
-    if (handle) {
-        dc->DisplayOwner = thread;
-        dc->ReadScreen = read_screen;
-    }
+    ARM64_USER_WINDOW *window = a ? window_lookup(a) : NULL;
+    ULONG handle = screen || window ? acquire_user_dc(thread, desktop, window, read_screen, FALSE) : 0;
     gdi_leave();
     return handle;
+}
+
+static ULONG_PTR user_call_one_param(WIN32_ARGS)
+{
+    if (b == XP_SFI_POSTQUITMESSAGE) return post_quit_message((ULONG)a);
+    if (b != XP_SFI_RELEASEDC) return 0;
+    gdi_enter();
+    ARM64_GDI_ENTRY *entry = gdi_lookup(a, GdiMemoryDc);
+    const ARM64_GDI_DC *dc = entry ? entry->Object : NULL;
+    BOOLEAN allowed = dc && !dc->Paint && dc->DisplayOwner == KeGetCurrentThread();
+    if (allowed) gdi_free(entry);
+    gdi_leave();
+    return allowed;
 }
 
 static BOOLEAN gdi_dc_raster(ULONG_PTR handle, BOOLEAN write, ARM64_GDI_RASTER *result)
@@ -249,33 +315,39 @@ static BOOLEAN gdi_dc_raster(ULONG_PTR handle, BOOLEAN write, ARM64_GDI_RASTER *
     if (!entry) return FALSE;
     const ARM64_GDI_DC *dc = entry->Object;
     if (dc->DisplayOwner) {
-        if (dc->DisplayOwner != KeGetCurrentThread() || (!write && !dc->ReadScreen)) return FALSE;
-        const XP_ARM64_BOOT_DISPLAY *display = boot_display();
-        *result = (ARM64_GDI_RASTER){(PULONG)display->VirtualBase, display->Width, display->Height,
-                                     display->Stride, display->Format == XP_DISPLAY_RGBX, TRUE};
+        PKTHREAD current = KeGetCurrentThread();
+        const ARM64_USER_THREAD *user = current->Win32Thread;
+        if (dc->DisplayOwner != current || !user || dc->Desktop != user->Desktop) return FALSE;
+        ARM64_USER_WINDOW *window = dc->Window;
+        if (window) {
+            *result = (ARM64_GDI_RASTER){window->Pixels, window->Width, window->Height, window->Width,
+                                         FALSE, FALSE, window, dc->Paint ? &window->Painting : NULL};
+        } else {
+            if (!write && !dc->ReadScreen) return FALSE;
+            const XP_ARM64_BOOT_DISPLAY *display = boot_display();
+            *result = (ARM64_GDI_RASTER){(PULONG)display->VirtualBase, display->Width, display->Height,
+                                         display->Stride, display->Format == XP_DISPLAY_RGBX, TRUE, NULL, NULL};
+        }
     } else {
         ARM64_GDI_BITMAP *bitmap = dc->Bitmap;
         if (!bitmap) return FALSE;
-        *result = (ARM64_GDI_RASTER){bitmap->Pixels, bitmap->Width, bitmap->Height, bitmap->Width, FALSE, FALSE};
+        *result = (ARM64_GDI_RASTER){bitmap->Pixels, bitmap->Width, bitmap->Height, bitmap->Width, FALSE, FALSE, NULL, NULL};
     }
     return TRUE;
 }
 
-static ULONG swap_red_blue(ULONG color)
-{
-    return ((color & 0xffu) << 16) | (color & 0xff00u) | ((color >> 16) & 0xffu);
-}
-
-static NTSTATUS gdi_pixel(ULONG_PTR handle, LONG x, LONG y, BOOLEAN write, ULONG color)
+static ULONG gdi_pixel(ULONG_PTR handle, LONG x, LONG y, BOOLEAN write, ULONG color)
 {
     ULONG result = GDI_CLR_INVALID;
     gdi_enter();
     ARM64_GDI_RASTER raster;
-    if (gdi_dc_raster(handle, write, &raster) && x >= 0 && y >= 0 && x < raster.Width && y < raster.Height) {
+    if (gdi_dc_raster(handle, write, &raster) && x >= 0 && y >= 0 && x < raster.Width && y < raster.Height &&
+        (!raster.Clip || RtlCheckBit(&raster.Clip->Bits, (ULONG)y * raster.Width + x))) {
         PULONG pixel = raster.Pixels + (SIZE_T)y * raster.Stride + x;
         if (write) {
             *pixel = raster.Rgbx ? color & 0xffffffu : swap_red_blue(color);
             if (raster.Display) flush_display(pixel, sizeof(*pixel));
+            if (raster.Window && raster.Window->Visible) present_window(raster.Window, x, y, 1, 1);
             result = color & 0xffffffu;
         } else result = raster.Rgbx ? *pixel & 0xffffffu : swap_red_blue(*pixel);
     }
@@ -283,17 +355,17 @@ static NTSTATUS gdi_pixel(ULONG_PTR handle, LONG x, LONG y, BOOLEAN write, ULONG
     return result;
 }
 
-static NTSTATUS gdi_set_pixel(WIN32_ARGS)
+static ULONG_PTR gdi_set_pixel(WIN32_ARGS)
 {
     return gdi_pixel(a, (LONG)b, (LONG)c, TRUE, (ULONG)d);
 }
 
-static NTSTATUS gdi_get_pixel(WIN32_ARGS)
+static ULONG_PTR gdi_get_pixel(WIN32_ARGS)
 {
     return gdi_pixel(a, (LONG)b, (LONG)c, FALSE, 0);
 }
 
-static NTSTATUS gdi_get_bitmap_bits(WIN32_ARGS)
+static ULONG_PTR gdi_get_bitmap_bits(WIN32_ARGS)
 {
     SIZE_T bytes = 0;
     gdi_enter();
@@ -310,7 +382,7 @@ static NTSTATUS gdi_get_bitmap_bits(WIN32_ARGS)
     return (NTSTATUS)bytes;
 }
 
-static NTSTATUS gdi_delete_object(WIN32_ARGS)
+static ULONG_PTR gdi_delete_object(WIN32_ARGS)
 {
     if (a == GDI_STOCK_BITMAP) return TRUE;
     gdi_enter();
@@ -322,6 +394,14 @@ static NTSTATUS gdi_delete_object(WIN32_ARGS)
     return allowed;
 }
 
+static VOID copy_paint_span(const ARM64_GDI_RASTER *dst, PULONG to, const ULONG *from,
+                            ULONG first, LONG count, LONG step, BOOLEAN swap)
+{
+    for (LONG offset = step > 0 ? 0 : count - 1; offset >= 0 && offset < count; offset += step)
+        if (RtlCheckBit(&dst->Clip->Bits, first + offset))
+            to[offset] = swap ? swap_red_blue(from[offset]) : from[offset];
+}
+
 /* Clip the matching source and destination spans before calculating pointers.
  * Width and height, after clipping, fit inside both surfaces. */
 static VOID gdi_copy_rect(const ARM64_GDI_RASTER *dst, LONG dx, LONG dy, LONG width, LONG height,
@@ -331,21 +411,34 @@ static VOID gdi_copy_rect(const ARM64_GDI_RASTER *dst, LONG dx, LONG dy, LONG wi
     LONGLONG top = max(0, max(-(LONGLONG)dy, -(LONGLONG)sy));
     LONGLONG right = min(width, min((LONGLONG)dst->Width - dx, (LONGLONG)src->Width - sx));
     LONGLONG bottom = min(height, min((LONGLONG)dst->Height - dy, (LONGLONG)src->Height - sy));
+    if (dst->Clip) {
+        const ARM64_USER_RECT *bounds = &dst->Clip->Bounds;
+        left = max(left, (LONGLONG)bounds->Left - dx);
+        top = max(top, (LONGLONG)bounds->Top - dy);
+        right = min(right, (LONGLONG)bounds->Right - dx);
+        bottom = min(bottom, (LONGLONG)bounds->Bottom - dy);
+    }
     if (left >= right || top >= bottom) return;
-    LONG step = (dst->Pixels == src->Pixels && dy > sy) ? -1 : 1;
+    BOOLEAN same = dst->Pixels == src->Pixels;
+    LONG step = same && dy > sy ? -1 : 1;
     for (LONGLONG y = step > 0 ? top : bottom - 1; top <= y && y < bottom; y += step) {
         PULONG to = dst->Pixels + ((dy + y) * dst->Stride + dx + left);
         PULONG from = src->Pixels + ((sy + y) * src->Stride + sx + left);
         SIZE_T count = right - left;
-        if (src->Rgbx == dst->Rgbx) RtlMoveMemory(to, from, count * sizeof(ULONG));
+        if (dst->Clip) {
+            ULONG first = (ULONG)(dy + y) * dst->Width + (ULONG)(dx + left);
+            copy_paint_span(dst, to, from, first, (LONG)count, same && dx > sx ? -1 : 1, src->Rgbx != dst->Rgbx);
+        } else if (src->Rgbx == dst->Rgbx) RtlMoveMemory(to, from, count * sizeof(ULONG));
         else {
             for (SIZE_T x = 0; x < count; ++x) to[x] = swap_red_blue(from[x]);
         }
         if (dst->Display) flush_display(to, count * sizeof(ULONG));
     }
+    if (dst->Window && dst->Window->Visible)
+        present_window(dst->Window, dx + left, dy + top, right - left, bottom - top);
 }
 
-static NTSTATUS gdi_bitblt(WIN32_ARGS)
+static ULONG_PTR gdi_bitblt(WIN32_ARGS)
 {
     if ((ULONG)i != GDI_SRCCOPY || k || (LONG)d < 0 || (LONG)e < 0) return FALSE;
     gdi_enter();

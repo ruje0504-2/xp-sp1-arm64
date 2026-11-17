@@ -51,6 +51,9 @@ XP_EFI_STATUS BlArm64Boot(PVOID image, XP_EFI_SYSTEM_TABLE *system,
     block->InitializationStatus = STATUS_PENDING;
     block->HalStatus = STATUS_PENDING;
     block->PlatformStatus = BlArm64DiscoverAcpiPlatform(system, &block->Platform);
+    RtlZeroMemory(&block->Virtio, sizeof(block->Virtio));
+    block->VirtioStatus = NT_SUCCESS(block->PlatformStatus) ?
+        BlArm64DiscoverVirtioMmio(system, &block->Platform, &block->Virtio) : STATUS_NOT_SUPPORTED;
     if (!NT_SUCCESS(BlArm64CaptureTime(system, &block->Time)))
         return XP_EFI_UNSUPPORTED;
     InitializeListHead(&block->Nt.LoadOrderListHead);

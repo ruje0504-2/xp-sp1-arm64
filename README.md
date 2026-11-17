@@ -2,7 +2,8 @@
 
 This repository contains an audited subset of the native ARM64 port and its test
 sources. It covers the UEFI boot path, AArch64 exception entry and context switching,
-kernel and process address spaces, native user-mode dispatch, and software rendering.
+kernel and process address spaces, native user-mode dispatch, software rendering, and VirtIO-MMIO keyboard and mouse
+input for QEMU.
 
 The integration build requires separately authorized Windows XP SP1 source and
 port overlays. This export does not contain the complete build inputs or a bootable

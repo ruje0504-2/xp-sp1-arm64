@@ -260,6 +260,11 @@ NTSTATUS MmArm64ProbeUserRead(MM_ARM64_USER_SPACE *space, ULONG_PTR address, SIZ
     return check_pages(space, address, bytes, FALSE);
 }
 
+NTSTATUS MmArm64ProbeUserWrite(MM_ARM64_USER_SPACE *space, ULONG_PTR address, SIZE_T bytes)
+{
+    return check_pages(space, address, bytes, TRUE);
+}
+
 NTSTATUS MmArm64CopyUserBuffer(MM_ARM64_USER_SPACE *space, ULONG_PTR address,
                                PVOID buffer, SIZE_T bytes, BOOLEAN to_user)
 {

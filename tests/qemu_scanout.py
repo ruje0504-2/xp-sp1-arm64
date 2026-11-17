@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 READY = b"PASS: display scanout final frame ready"
+MOUSE_READY = b"READY: native USER waiting for VirtIO mouse"
+KEYBOARD_READY = b"READY: native USER waiting for VirtIO keyboard"
 
 
 def qmp_command(channel, name, arguments=None):
@@ -41,8 +43,12 @@ def ppm(path):
 def verify_capture(target, reference, log):
     evidence = re.search(rb"Scanout evidence width=(0x[0-9a-f]+) height=(0x[0-9a-f]+)"
                          rb" stride=(0x[0-9a-f]+) format=(0x[0-9a-f]+) hdc=(0x[0-9a-f]+)", log)
-    if not evidence:
-        raise RuntimeError("The guest did not report a live display DC")
+    markers = (b"PASS: live HWND overlap and client clipping match all 224 framebuffer pixels",
+               b"PASS: native WM_PAINT, disjoint update clipping, nested erase and EndPaint rundown",
+               b"PASS: native GetMessage blocks, cross-thread posts wake and dispatch, WM_QUIT drains",
+               b"PASS: VirtIO keyboard and mouse IRQs wake native USER, dispatch and paint")
+    if not evidence or any(marker not in log for marker in markers):
+        raise RuntimeError("The guest did not verify the native desktop and VirtIO input")
     width, height, stride, pixel_format, dc = (int(value, 16) for value in evidence.groups())
     captured_width, captured_height, actual = ppm(target)
     if (captured_width, captured_height) != (width, height) or stride < width or pixel_format not in (0, 1) or not dc:
@@ -61,23 +67,35 @@ def verify_capture(target, reference, log):
         raise RuntimeError(f"QMP scanout pixel ({x}, {y}) differs from the guest-rendered bitmap")
 
 
+def wait_for_marker(process, console, marker, deadline):
+    while True:
+        log = console.read_bytes()
+        if b"FAIL:" in log or process.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError(f"QEMU did not reach {marker.decode()}")
+        if marker in log:
+            return log
+        if READY in log:
+            raise RuntimeError(f"QEMU finished before {marker.decode()}")
+        time.sleep(0.02)
+
+
+def send_input(channel, events):
+    qmp_command(channel, "input-send-event", {"events": events})
+
+
 def capture(target, reference, command):
     target.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="xp-scanout-", dir="/tmp") as work:
         endpoint = Path(work) / "qmp.sock"
         console = Path(work) / "serial.log"
+        devices = ["-device", "ramfb", "-global", "virtio-mmio.force-legacy=false",
+                   "-device", "virtio-keyboard-device", "-device", "virtio-mouse-device"]
         with console.open("wb") as stream:
-            process = subprocess.Popen([*command, "-device", "ramfb", "-qmp", f"unix:{endpoint},server=on,wait=off"],
+            process = subprocess.Popen([*command, *devices, "-qmp", f"unix:{endpoint},server=on,wait=off"],
                                        stdout=stream, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 45
-            while True:
-                log = console.read_bytes()
-                if READY in log and b"FAIL:" not in log:
-                    break
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError("QEMU did not reach the completed scanout frame")
-                time.sleep(0.05)
+            wait_for_marker(process, console, MOUSE_READY, deadline)
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(5)
                 client.connect(str(endpoint))
@@ -85,6 +103,15 @@ def capture(target, reference, command):
                     if "QMP" not in json.loads(channel.readline()):
                         raise RuntimeError("QEMU did not supply a QMP greeting")
                     qmp_command(channel, "qmp_capabilities")
+                    send_input(channel, [{"type": "rel", "data": {"axis": axis, "value": offset}}
+                                         for axis, offset in (("x", 260), ("y", 68))])
+                    for down in (True, False):
+                        send_input(channel, [{"type": "btn", "data": {"button": "left", "down": down}}])
+                    wait_for_marker(process, console, KEYBOARD_READY, deadline)
+                    for down in (True, False):
+                        send_input(channel, [{"type": "key", "data": {"key": {"type": "qcode", "data": "a"},
+                                                                      "down": down}}])
+                    log = wait_for_marker(process, console, READY, deadline)
                     qmp_command(channel, "screendump", {"filename": str(target.resolve())})
                     verify_capture(target, reference, log)
                     qmp_command(channel, "quit")

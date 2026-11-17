@@ -25,9 +25,10 @@ NTSTATUS KiArm64RunUserThread(KARM64_USER_ENTRY *Entry);
 NTSTATUS KiArm64DeliverPendingUserApc(KARM64_USER_ENTRY *Entry);
 NTSTATUS KiArm64UserService(MM_ARM64_USER_SPACE *Space, KARM64_USER_ENTRY *Entry);
 NTSTATUS KiArm64DispatchUserException(MM_ARM64_USER_SPACE *Space, KARM64_USER_ENTRY *Entry, ULONG_PTR Dispatcher);
-/* Eight register arguments followed by up to three eight-byte stack slots.
+/* Eight register arguments followed by up to seven eight-byte stack slots.
  * The native descriptor's Number entries specify arguments, not bytes. */
-typedef NTSTATUS (*PKARM64_WIN32_SERVICE)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+typedef ULONG_PTR (*PKARM64_WIN32_SERVICE)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+                                         ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
                                          ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
                                          ULONG_PTR, ULONG_PTR, ULONG_PTR);
 #endif

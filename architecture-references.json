@@ -99,6 +99,42 @@
       "title": "QEMU QMP screendump",
       "use": "Host capture of simulated display output for byte-for-byte comparison",
       "code_copied": false
+    },
+    {
+      "url": "https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html",
+      "title": "VirtIO 1.2, sections 2.7, 3.1, 4.2 and 5.8",
+      "use": "Modern MMIO feature negotiation, coherent split queues, eventq and evdev input records",
+      "code_copied": false
+    },
+    {
+      "url": "https://devicetree-specification.readthedocs.io/en/stable/flattened-format.html",
+      "title": "Devicetree Specification, flattened format",
+      "use": "Bounded pre-exit FDT traversal and big-endian cells",
+      "code_copied": false
+    },
+    {
+      "url": "https://uefi.org/specs/UEFI/2.9_A/04_EFI_System_Table.html",
+      "title": "UEFI System Table and Devicetree configuration table",
+      "use": "EFI_DTB_TABLE_GUID table lookup before firmware exit",
+      "code_copied": false
+    },
+    {
+      "url": "https://www.qemu.org/docs/master/system/arm/virt.html",
+      "title": "QEMU ARM virt platform",
+      "use": "VirtIO-MMIO transports and documented bare-metal DTB location when firmware does not expose the DTB",
+      "code_copied": false
+    },
+    {
+      "url": "https://documentation-service.arm.com/static/5f8ff21df86e16515cdbfafe",
+      "title": "Arm Generic Interrupt Controller Architecture Specification IHI 0048B",
+      "use": "SPI programming and uniprocessor interrupt-target registers read-as-zero/write-ignored",
+      "code_copied": false
+    },
+    {
+      "url": "https://github.com/torvalds/linux/blob/master/include/uapi/linux/input-event-codes.h",
+      "title": "Linux evdev input event numbers",
+      "use": "Public event type and key, mouse button and relative axis constants for the VirtIO input transport",
+      "code_copied": false
     }
   ]
 }
