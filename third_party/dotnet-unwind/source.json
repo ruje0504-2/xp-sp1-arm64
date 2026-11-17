@@ -1,0 +1,41 @@
+{
+  "repository": "https://github.com/dotnet/runtime",
+  "tag": "v8.0.0",
+  "tag_object": "3c6d09ef060f1523859e28d729b8f500815095a5",
+  "license": "MIT",
+  "files": {
+    "upstream-arm64.cpp": {
+      "path": "src/coreclr/unwinder/arm64/unwinder.cpp",
+      "url": "https://raw.githubusercontent.com/dotnet/runtime/v8.0.0/src/coreclr/unwinder/arm64/unwinder.cpp",
+      "sha256": "587d2fa6177947f34c9ef68fd999ecfd9ba9a30f724de5394682daea883b0481",
+      "pinned_url": "https://raw.githubusercontent.com/dotnet/runtime/5535e31a712343a63f5d7d796cd874e563e5ac14/src/coreclr/unwinder/arm64/unwinder.cpp"
+    },
+    "upstream-arm64.h": {
+      "path": "src/coreclr/unwinder/arm64/unwinder.h",
+      "url": "https://raw.githubusercontent.com/dotnet/runtime/v8.0.0/src/coreclr/unwinder/arm64/unwinder.h",
+      "sha256": "6e3c8f62a34ddb55c188325d32ad85fb3a51c28273780f3e4c6a7e53fac2704b",
+      "pinned_url": "https://raw.githubusercontent.com/dotnet/runtime/5535e31a712343a63f5d7d796cd874e563e5ac14/src/coreclr/unwinder/arm64/unwinder.h"
+    },
+    "LICENSE.TXT": {
+      "path": "LICENSE.TXT",
+      "url": "https://raw.githubusercontent.com/dotnet/runtime/v8.0.0/LICENSE.TXT",
+      "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310",
+      "pinned_url": "https://raw.githubusercontent.com/dotnet/runtime/5535e31a712343a63f5d7d796cd874e563e5ac14/LICENSE.TXT"
+    }
+  },
+  "commit": "5535e31a712343a63f5d7d796cd874e563e5ac14",
+  "adaptation": {
+    "file": "base/ntos/rtl/arm64/unwind.c",
+    "changes": [
+      "XP public type/include adaptation; no CLR/DAC classes",
+      "removed Windows private frame definitions and custom decoder",
+      "explicitly reject private/custom opcodes, end_c and unimplemented encodings",
+      "bounded image and stack reads; restored-register index validation",
+      "propagate LR restore errors; require END; validate packed register counts",
+      "validate PE function metadata and selected prolog/epilog streams",
+      "commit context and result only on success",
+      "Expose effective control PC, function bounds and normalized frame SP to the owned static-frame C dispatcher"
+    ],
+    "scope": "baseline public ARM64 PE metadata; not full SEH or a claim that every upstream feature was ported"
+  }
+}
