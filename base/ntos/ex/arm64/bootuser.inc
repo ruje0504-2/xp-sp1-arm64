@@ -3,12 +3,15 @@
 #include "xp-token.h"
 #include "xp-win32-services.h"
 #include "xp-win32-postable.h"
+#include "xp-kbd-us.h"
+#include "font8x8-basic.h"
 
 typedef struct {
     HANDLE StationHandle;
     ACCESS_MASK StationAccess;
     ARM64_CONSOLE_STATION *Station;
     LIST_ENTRY Threads;
+    ULONG_PTR ClientModule, EditProcedure;
 } ARM64_USER_PROCESS;
 
 #define USER_QUEUE_LIMIT 64
@@ -24,7 +27,7 @@ typedef struct {
 
 typedef struct {
     ARM64_USER_MSG Message;
-    ULONG Category;
+    ULONG Category, InputState;
 } ARM64_QUEUE_ENTRY;
 
 _Static_assert(sizeof(ARM64_USER_MSG) == 48 && FIELD_OFFSET(ARM64_USER_MSG, WParam) == 16,
@@ -39,7 +42,9 @@ typedef struct {
     PEPROCESS_QUOTA_BLOCK Quota;
     KEVENT QueueEvent;
     ARM64_QUEUE_ENTRY Messages[USER_QUEUE_LIMIT];
-    ULONG MessageCount, PostedCount, QuitCode;
+    ULONG MessageCount, PostedCount, QuitCode, KeyModifiers;
+    ULONG FocusWindow;
+    ULONG64 FocusRevision;
     BOOLEAN QuitPosted;
 } ARM64_USER_THREAD;
 
@@ -412,11 +417,18 @@ static PKARM64_WIN32_SERVICE user_services[] = {
     [XP_GdiGetBitmapBits - 0x1000] = gdi_get_bitmap_bits,
     [XP_GdiDeleteObjectApp - 0x1000] = gdi_delete_object,
     [XP_GdiBitBlt - 0x1000] = gdi_bitblt,
+    [XP_GdiExtTextOutW - 0x1000] = gdi_ext_text_out,
+    [XP_GdiGetTextExtent - 0x1000] = gdi_get_text_extent,
     [XP_UserGetDC - 0x1000] = user_get_dc,
     [XP_UserRegisterClassExWOW - 0x1000] = user_register_class,
+    [XP_UserInitializeClientPfnArrays - 0x1000] = user_initialize_client,
+    [XP_UserSetWindowFNID - 0x1000] = user_set_window_fnid,
     [XP_UserCreateWindowEx - 0x1000] = user_create_window,
     [XP_UserDestroyWindow - 0x1000] = user_destroy_window,
     [XP_UserShowWindow - 0x1000] = user_show_window,
+    [XP_UserSetFocus - 0x1000] = user_set_focus,
+    [XP_UserGetAncestor - 0x1000] = user_get_ancestor,
+    [XP_UserGetThreadState - 0x1000] = user_get_thread_state,
     [XP_UserCallOneParam - 0x1000] = user_call_one_param,
     [XP_UserInvalidateRect - 0x1000] = user_invalidate_rect,
     [XP_UserGetUpdateRect - 0x1000] = user_get_update_rect,
@@ -427,11 +439,16 @@ static PKARM64_WIN32_SERVICE user_services[] = {
     [XP_UserPostMessage - 0x1000] = user_post_message,
     [XP_UserPostThreadMessage - 0x1000] = user_post_thread_message,
     [XP_UserDispatchMessage - 0x1000] = user_dispatch_message,
+    [XP_UserTranslateMessage - 0x1000] = user_translate_message,
+    [XP_UserMessageCall - 0x1000] = user_message_call,
+    [XP_UserDefSetText - 0x1000] = user_default_set_text,
+    [XP_UserInternalGetWindowText - 0x1000] = user_internal_get_window_text,
     [XP_UserCallHwndLock - 0x1000] = user_call_hwnd_lock,
 };
 
 static UCHAR user_service_arguments[sizeof(user_services) / sizeof(user_services[0])] = {
     [XP_GdiBitBlt - 0x1000] = 11,
+    [XP_GdiExtTextOutW - 0x1000] = 9,
     [XP_UserCreateWindowEx - 0x1000] = 15,
 };
 

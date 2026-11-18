@@ -675,6 +675,30 @@ window_zero_stack:
     window_call XP_UserRegisterClassExWOW, __LINE__
     cbnz w0, dispatch_failed
 
+    mov w0, w20
+    add x1, x19, #0x500
+    bl XpNativeWindowProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+    add x0, x19, #0x540
+    bl XpNativeFocusProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+    add x0, x19, #0x560
+    ldr x1, [x19, #80]
+    bl XpNativeChildProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+    add x0, x19, #0x580
+    add x1, x19, #0xffe
+    bl XpNativeSyncTextProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+    add x0, x19, #0x5a0
+    bl XpNativeEditClassProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+
     mov x9, #10
     str x9, [sp]              /* nHeight */
     mov x9, #1
@@ -837,6 +861,34 @@ window_no_screen:
     bl window_paint_probe
     bl window_message_probe
     bl window_input_probe
+    ldr w9, [x19, #208]
+    cbz w9, after_edit_probe
+    add x0, sp, #56
+    bl XpNativeCreateStockEditHost
+    cbz x0, dispatch_failed
+    mov x24, x0
+    ldr x28, [sp, #56]
+    cbz x28, dispatch_failed
+    mov x0, x28
+    add x1, x19, #212
+    bl XpNativeStockEditProbe
+    str w0, [x19, #132]
+    cbnz w0, dispatch_failed
+    mov x0, x24
+    window_call XP_UserDestroyWindow, __LINE__
+    cbz w0, dispatch_failed
+    mov x0, x28
+    window_call XP_UserGetDC, __LINE__
+    cbnz x0, dispatch_failed
+    mov w0, #XP_THREAD_STATE_FOCUS
+    window_call XP_UserGetThreadState, __LINE__
+    cbnz x0, dispatch_failed
+    adrp x10, XpWindowHardwareFocusCount
+    ldr w10, [x10, :lo12:XpWindowHardwareFocusCount]
+    str w10, [x19, #0x558]
+    mov w9, #8
+    str w9, [x19, #212]
+after_edit_probe:
     mov x9, #4
     str x9, [sp]
     mov w0, wzr
@@ -1241,6 +1293,12 @@ user_post_program:
     ldr x0, [x19, #32]
     call_win32 XP_UserSetThreadDesktop
     cbz w0, dispatch_failed
+    ldr x0, [x19, #104]
+    call_win32 XP_UserSetFocus
+    cbnz x0, dispatch_failed
+    mov w0, #XP_THREAD_STATE_FOCUS
+    call_win32 XP_UserGetThreadState
+    cbnz x0, dispatch_failed
     mov w0, #0x7fff
     mov w1, #TEST_PEER_THREAD_MESSAGE
     mov x2, xzr
@@ -1346,6 +1404,10 @@ window_input_probe:
     receive_input 0x200, 0, 0x00040004
     receive_input 0x201, 1, 0x00040004
     receive_input 0x202, 0, 0x00040004
+    mov w0, #XP_THREAD_STATE_FOCUS
+    window_call XP_UserGetThreadState, __LINE__
+    cmp x0, x25
+    b.ne dispatch_failed
     mov w9, #2
     add x10, x19, #212
     stlr w9, [x10]
@@ -1398,18 +1460,84 @@ window_key_paint:
 /* The port's native callback dispatcher invokes an executable registered
  * procedure from the fnDWORD record and returns a native CALLBACKSTATUS. */
 dispatch_user_window:
+    sub sp, sp, #32
+    stp xzr, xzr, [sp]
+    str xzr, [sp, #16]
+    cmp w0, #XP_FI_FNINSTRINGNULL
+    b.eq dispatch_user_input_text
+    cmp w0, #XP_FI_FNOUTSTRING
+    b.eq dispatch_user_output_text
+    cmp w0, #XP_FI_FNGETTEXTLENGTHS
+    b.eq dispatch_user_scalar
+    cmp w0, #XP_FI_FNINLPCREATESTRUCT
+    b.eq dispatch_user_create
     cmp w0, #XP_FI_FNDWORD
+    b.eq dispatch_user_scalar
+    cmp w0, #XP_FI_FNNCDESTROY
     b.ne dispatch_failed
+dispatch_user_scalar:
     cmp w2, #48
     b.ne dispatch_failed
+    ldr x3, [x1, #24]
+    b dispatch_user_wndproc
+
+dispatch_user_input_text:
+    sub w10, w2, #48
+    cmp w10, #8192
+    b.hi dispatch_failed
+    tbnz w10, #0, dispatch_failed
+    add x3, x1, #48
+    cmp w10, #0
+    csel x3, x3, xzr, ne
+    b dispatch_user_wndproc
+
+dispatch_user_output_text:
+    sub w10, w2, #48
+    cbz w10, dispatch_failed
+    cmp w10, #8192
+    b.hi dispatch_failed
+    ldr x11, [x1, #16]
+    cmp x10, x11, lsl #1
+    b.ne dispatch_failed
+    add x3, x1, #48
+    str w10, [sp, #8]
+    str x3, [sp, #16]
+    b dispatch_user_wndproc
+
+dispatch_user_create:
+    cmp w2, #136
+    b.lo dispatch_failed
+    cmp w2, #648
+    b.hi dispatch_failed
+    add x3, x1, #48
+    ldp w10, w11, [x1, #128]
+    cbz w10, 1f
+    cmp w10, #136
+    b.lo dispatch_failed
+    cmp w10, w2
+    b.hs dispatch_failed
+    tbnz w10, #0, dispatch_failed
+    add x10, x1, x10
+    str x10, [x3, #56]          /* CREATESTRUCT.lpszName */
+1:
+    cbz w11, dispatch_user_wndproc
+    cmp w11, #136
+    b.lo dispatch_failed
+    cmp w11, w2
+    b.hs dispatch_failed
+    tbnz w11, #0, dispatch_failed
+    add x11, x1, x11
+    str x11, [x3, #64]          /* CREATESTRUCT.lpszClass */
+dispatch_user_wndproc:
+    ldr w9, [x1, #12]
+    cbnz w9, dispatch_failed
     ldr x16, [x1, #40]
-    ldp x2, x3, [x1, #16]
+    ldr x4, [x1, #32]
+    ldr x2, [x1, #16]
     ldr x0, [x1]
     ldr w1, [x1, #8]
     blr x16
-    sub sp, sp, #32
-    stp x0, xzr, [sp]
-    str xzr, [sp, #16]
+    str x0, [sp]
     mov x0, sp
     mov w1, #24
     mov w2, wzr
@@ -1418,6 +1546,19 @@ dispatch_user_window:
     b dispatch_failed
 
 window_procedure:
+    sub w9, w1, #7
+    cmp w9, #1
+    b.ls XpNativeFocusMessage
+    sub w9, w1, #1
+    cmp w9, #1
+    b.ls XpNativeWindowLifecycle
+    sub w9, w1, #0x81
+    cmp w9, #1
+    b.ls XpNativeWindowLifecycle
+    adrp x9, XpEditWindow
+    ldr x9, [x9, :lo12:XpEditWindow]
+    cmp x0, x9
+    b.eq XpNativeEditProcedure
     cmp x0, x25
     b.ne dispatch_failed
     mov w9, #TEST_WINDOW_MESSAGE
@@ -1545,6 +1686,38 @@ window_erase_background:
     add sp, sp, #80
     mov w0, #1
     ret
+
+/* Preserve the user's outgoing argument area, including ExtTextOutW arg 9. */
+.macro native_service name, service
+.globl \name
+\name:
+    call_win32 \service
+    ret
+.endm
+native_service XpEditGetMessage, XP_UserGetMessage
+native_service XpEditTranslate, XP_UserTranslateMessage
+native_service XpEditDispatch, XP_UserDispatchMessage
+native_service XpEditBeginPaint, XP_UserBeginPaint
+native_service XpEditEndPaint, XP_UserEndPaint
+native_service XpEditInvalidate, XP_UserInvalidateRect
+native_service XpEditCallHwndLock, XP_UserCallHwndLock
+native_service XpEditTextOut, XP_GdiExtTextOutW
+native_service XpEditExtent, XP_GdiGetTextExtent
+native_service XpEditPixel, XP_GdiGetPixel
+native_service XpWindowCreate, XP_UserCreateWindowEx
+native_service XpWindowDestroy, XP_UserDestroyWindow
+native_service XpWindowGetDc, XP_UserGetDC
+native_service XpWindowCallOne, XP_UserCallOneParam
+native_service XpWindowSetFocus, XP_UserSetFocus
+native_service XpWindowGetThreadState, XP_UserGetThreadState
+native_service XpWindowShow, XP_UserShowWindow
+native_service XpWindowAncestor, XP_UserGetAncestor
+native_service XpWindowSetPixel, XP_GdiSetPixel
+native_service XpWindowPost, XP_UserPostMessage
+native_service XpWindowPeek, XP_UserPeekMessage
+native_service XpEditMessage, XP_UserMessageCall
+native_service XpWindowDefSetText, XP_UserDefSetText
+native_service XpWindowInternalText, XP_UserInternalGetWindowText
 
 .section .rdata,"dr"
 .p2align 1

@@ -1,7 +1,5 @@
 /* Coherent input transport delivers Linux evdev records at PASSIVE_LEVEL.
  * USER owns the pointer, focus and queue under gdi_lock. */
-#define USER_WM_KEYDOWN 0x0100u
-#define USER_WM_SYSKEYDOWN 0x0104u
 #define USER_WM_MOUSEMOVE 0x0200u
 #define USER_WM_LBUTTONDOWN 0x0201u
 #define USER_WM_RBUTTONDOWN 0x0204u
@@ -9,30 +7,36 @@
 #define USER_MK_SHIFT 0x0004u
 #define USER_MK_CONTROL 0x0008u
 
-static ULONG focused_window;
 static LONG pointer_x, pointer_y;
 static ULONG pointer_buttons;
 static BOOLEAN pointer_moved;
-static BOOLEAN key_down[128];
+static BOOLEAN key_down[128], caps_lock;
 
-static VOID post_input(ARM64_USER_WINDOW *window, ULONG category, ULONG message, ULONG_PTR wparam, ULONG_PTR lparam)
+static BOOLEAN post_input(ARM64_USER_WINDOW *window, ULONG category, ULONG message,
+                          ULONG_PTR wparam, ULONG_PTR lparam, ULONG input_state)
 {
-    if (!window) return;
-    enqueue_user_message(window->Owner->Win32Thread, category, window_handle(window),
-                         message, wparam, lparam, pointer_x, pointer_y);
+    return window && enqueue_user_message(window->Owner->Win32Thread, category, window_handle(window),
+                                           message, wparam, lparam, pointer_x, pointer_y, input_state);
 }
 
 static ARM64_USER_WINDOW *foreground_window(BOOLEAN hit_test)
 {
     if (!hit_test) {
-        ARM64_USER_WINDOW *focused = window_lookup_live(focused_window);
-        if (focused && focused->Visible && desktop_is_presented(focused->Desktop)) return focused;
+        ARM64_USER_RECT clip;
+        ARM64_USER_WINDOW *pending = window_lookup_live(pointer_focus);
+        if (pending && window_screen_clip(pending, &clip)) return pending;
+        if (foreground_queue) {
+            ARM64_USER_WINDOW *focused = window_lookup_live(foreground_queue->FocusWindow);
+            return focused && desktop_is_presented(focused->Desktop) &&
+                   window_screen_clip(focused, &clip) ? focused : NULL;
+        }
     }
     for (PLIST_ENTRY link = window_order.Blink; link != &window_order; link = link->Blink) {
         ARM64_USER_WINDOW *window = CONTAINING_RECORD(link, ARM64_USER_WINDOW, ZOrder);
-        if (!window->Visible || !desktop_is_presented(window->Desktop)) continue;
-        if (!hit_test || (pointer_x >= window->X && pointer_x < window->X + window->Width &&
-                         pointer_y >= window->Y && pointer_y < window->Y + window->Height)) return window;
+        ARM64_USER_RECT clip;
+        if (!desktop_is_presented(window->Desktop) || !window_screen_clip(window, &clip)) continue;
+        if (!hit_test || (pointer_x >= clip.Left && pointer_x < clip.Right &&
+                         pointer_y >= clip.Top && pointer_y < clip.Bottom)) return window;
     }
     return NULL;
 }
@@ -69,10 +73,15 @@ static VOID keyboard_event(USHORT code, LONG value)
     if (!key) return;
     BOOLEAN previous = key_down[code], alt = key_down[56] || key_down[100];
     key_down[code] = value != 0;
+    if (code == 58 && value == 1 && !previous) caps_lock = !caps_lock;
+    ULONG modifiers = (key_down[42] || key_down[54] ? USER_MOD_SHIFT : 0) |
+                      (key_down[29] || key_down[97] ? USER_MOD_CTRL : 0) |
+                      (key_down[56] || key_down[100] ? USER_MOD_ALT : 0) |
+                      (caps_lock ? USER_MOD_CAPS : 0);
     ULONG lparam = 1 | (scan << 16) | (alt ? 1u << 29 : 0) |
                    (previous || value == 2 ? 1u << 30 : 0) | (value == 0 ? 1u << 31 : 0);
     ULONG message = alt || key == 0x12 || key == 0x79 ? USER_WM_SYSKEYDOWN : USER_WM_KEYDOWN;
-    post_input(foreground_window(FALSE), USER_QS_KEY, message + (value == 0), key, lparam);
+    post_input(foreground_window(FALSE), USER_QS_KEY, message + (value == 0), key, lparam, modifiers);
 }
 
 static VOID pointer_event(USHORT type, USHORT code, LONG value)
@@ -94,18 +103,24 @@ static VOID pointer_event(USHORT type, USHORT code, LONG value)
         static const ULONG buttons[3] = {1, 2, 0x10};
         static const ULONG down[3] = {USER_WM_LBUTTONDOWN, USER_WM_RBUTTONDOWN, USER_WM_MBUTTONDOWN};
         ULONG index = code - 0x110;
-        if (value) {
-            pointer_buttons |= buttons[index];
-            if (window) focused_window = window_handle(window);
-        } else pointer_buttons &= ~buttons[index];
+        if (value) pointer_buttons |= buttons[index];
+        else pointer_buttons &= ~buttons[index];
         message = down[index] + (value == 0);
     } else pointer_moved = FALSE;
     if (!window) return;
     ULONG lparam = (USHORT)(pointer_x - window->X) | (ULONG)(USHORT)(pointer_y - window->Y) << 16;
     ULONG modifiers = (key_down[42] || key_down[54] ? USER_MK_SHIFT : 0) |
                       (key_down[29] || key_down[97] ? USER_MK_CONTROL : 0);
-    post_input(window, button ? USER_QS_MOUSEBUTTON : USER_QS_MOUSEMOVE,
-               message, pointer_buttons | modifiers, lparam);
+    ULONG focus_ticket = 0;
+    if (button && value) {
+        if (++pointer_focus_sequence == 0) ++pointer_focus_sequence;
+        focus_ticket = pointer_focus_sequence;
+    }
+    if (post_input(window, button ? USER_QS_MOUSEBUTTON : USER_QS_MOUSEMOVE,
+                   message, pointer_buttons | modifiers, lparam, focus_ticket) && focus_ticket) {
+        pointer_focus = window_handle(window);
+        pointer_focus_ticket = focus_ticket;
+    }
 }
 
 VOID ExpArm64RouteBootInput(BOOLEAN keyboard, USHORT type, USHORT code, LONG value)

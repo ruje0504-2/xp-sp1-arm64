@@ -18,6 +18,11 @@ XpUserProgram:
     b.ne 2b
     brk #0xdf
 3:
+    /* XP KUSER_SHARED_DATA places the low tick and multiplier first. */
+    ldar w27, [x3]
+    ldr w9, [x3, #4]
+    umull x28, w27, w9
+    lsr x28, x28, #24
 .globl XpUserReadonlyWrite
 XpUserReadonlyWrite:
     str w20, [x2]

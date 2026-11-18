@@ -3,6 +3,7 @@
 #include "ki.h"
 #include "../base/boot/arm64/boot.h"
 #include "../base/ntos/ke/arm64/scheduler.h"
+#include "../base/ntos/ke/arm64/clock.h"
 #include "../base/ntos/hal/arm64/gicv2.h"
 #include "uefi_test.h"
 VOID XpCheckThreadExit(PXP_ARM64_BOOT_BLOCK Block);
@@ -240,7 +241,10 @@ static VOID check_timer_service(VOID)
     CHECK(prcb->KernelTime==stats.RuntimeTicks);
     CHECK(prcb->KernelTime==process->Pcb.KernelTime+prcb->DpcTime+prcb->InterruptTime);
     CHECK(process->Pcb.KernelTime==control.KernelTime+idle_thread->KernelTime+worker_thread.KernelTime);
-    CHECK((ULONG64)KeTickCount.QuadPart==KeQueryInterruptTime()/10000);
+    ULONG64 time = KeQueryInterruptTime();
+    CHECK((ULONG64)KeTickCount.QuadPart == time / 10000 &&
+          SharedUserData->TickCountLow == KeTickCount.LowPart &&
+          KiTickOffset == 10000 - time % 10000);
     CHECK(!HalArm64TimerPendingOrActive() && !KeIsExecutingDpc());
     CHECK(KeGetCurrentPrcb()->DpcQueueDepth==0 && IsListEmpty(&KeGetCurrentPrcb()->DpcListHead));
     for (ULONG i=0;i<TIMER_TABLE_SIZE;++i) CHECK(IsListEmpty(&KiTimerTableListHead[i]));

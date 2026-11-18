@@ -8,8 +8,11 @@ static ULONG scan_hand;
 static KI_ARM64_TIMER_DISPATCH_STATS stats;
 static VOID publish_ticks(VOID)
 {
-    ULONG64 ticks=KeQueryInterruptTime()/10000;
-    __atomic_store_n(&KeTickCount.QuadPart,(LONG64)ticks,__ATOMIC_RELEASE);
+    ULONG64 time = KeQueryInterruptTime();
+    ULONG64 ticks = KiArm64InterruptTicks(time);
+    KiTickOffset = KeMaximumIncrement - (ULONG)(time - ticks * KeMaximumIncrement);
+    __atomic_store_n(&KeTickCount.QuadPart, (LONG64)ticks, __ATOMIC_RELEASE);
+    __atomic_store_n(&SharedUserData->TickCountLow, (ULONG)ticks, __ATOMIC_RELEASE);
     stats.Ticks=ticks;
 }
 /* Follow the original IA64/AMD64 KeUpdateRunTime EL1 classification.
@@ -68,7 +71,7 @@ NTSTATUS KiArm64EnableTimerDispatch(VOID)
             initialized=TRUE;
         }
         enabled=TRUE;
-        status=HalArm64StartBootTimer(1000);
+        status=HalArm64StartBootTimer(KI_ARM64_CLOCK_HZ);
         if (!NT_SUCCESS(status)) enabled=FALSE;
     }
     KeLowerIrql(old);

@@ -2,6 +2,7 @@
  * and quantum-end decisions use the original XP algorithms. */
 #include "ki.h"
 #include "scheduler.h"
+#include "clock.h"
 #include "../../ps/arm64/bootprocess.h"
 KAFFINITY KiIdleSummary;
 ULONG KiReadySummary;
@@ -242,8 +243,7 @@ __declspec(noreturn) VOID KiArm64StartThread(PKSYSTEM_ROUTINE system, PKSTART_RO
 }
 ULONG KiComputeTimerTableIndex(LARGE_INTEGER interval, LARGE_INTEGER current, PKTIMER timer)
 {
-    /* Exact unsigned arithmetic for the original due-time contract. Early
-     * bins use the same 1 ms (10000 x 100ns) quantum as IRQ-derived ticks. */
-    timer->DueTime.QuadPart=(ULONG64)current.QuadPart-(ULONG64)interval.QuadPart;
-    return (ULONG)((timer->DueTime.QuadPart/10000) & (TIMER_TABLE_SIZE-1));
+    ULONG64 due = (ULONG64)current.QuadPart - (ULONG64)interval.QuadPart;
+    timer->DueTime.QuadPart = due;
+    return (ULONG)(KiArm64InterruptTicks(due) & (TIMER_TABLE_SIZE - 1));
 }

@@ -125,9 +125,10 @@ static VOID check_high_shared_page(const XP_ARM64_BOOT_BLOCK *block)
     CHECK(MmArm64QueryPhysicalAddress(va+PAGE_SIZE)==~0ULL);
     XpCheckStackFault(clock.SharedPagePhysical); /* The old identity view really faults. */
 
-    /* Initial publication owns only these two fields. Check that all other
-     * bytes in the reusable physical page were cleared before publication. */
-    ULONG first=FIELD_OFFSET(KUSER_SHARED_DATA,InterruptTime);
+    /* TickCountLow is still zero until the runtime clock starts. The
+     * multiplier and initial time fields are the only published bytes. */
+    CHECK(!SharedUserData->TickCountLow && SharedUserData->TickCountMultiplier == 0x01000000);
+    ULONG first=FIELD_OFFSET(KUSER_SHARED_DATA,TickCountMultiplier);
     ULONG end=FIELD_OFFSET(KUSER_SHARED_DATA,SystemTime)+sizeof(KSYSTEM_TIME);
     const volatile UCHAR *bytes=(PVOID)va;
     for (ULONG i=0;i<PAGE_SIZE;++i)

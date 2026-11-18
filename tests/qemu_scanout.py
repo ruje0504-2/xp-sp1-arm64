@@ -11,6 +11,11 @@ from pathlib import Path
 READY = b"PASS: display scanout final frame ready"
 MOUSE_READY = b"READY: native USER waiting for VirtIO mouse"
 KEYBOARD_READY = b"READY: native USER waiting for VirtIO keyboard"
+EDIT_CLICK = b"READY: native edit window waiting for focus click"
+EDIT_INITIAL = b"READY: native edit window waiting for initial text"
+EDIT_KEYS = b"READY: native edit window waiting for editing keys"
+EDIT_PAINTED = b"READY: native edit window painted and waiting for Return"
+EDIT_PASS = b"PASS: native TranslateMessage queues WM_CHAR, USER32 EDIT reads cB and text extent is 16x8"
 
 
 def qmp_command(channel, name, arguments=None):
@@ -43,10 +48,17 @@ def ppm(path):
 def verify_capture(target, reference, log):
     evidence = re.search(rb"Scanout evidence width=(0x[0-9a-f]+) height=(0x[0-9a-f]+)"
                          rb" stride=(0x[0-9a-f]+) format=(0x[0-9a-f]+) hdc=(0x[0-9a-f]+)", log)
-    markers = (b"PASS: live HWND overlap and client clipping match all 224 framebuffer pixels",
+    markers = (b"PASS: original XP clock setup initializes native reciprocal timer buckets",
+               b"PASS: ARM64 EL0 reads XP shared tick count and converts it to milliseconds",
+               b"PASS: live HWND overlap and client clipping match all 224 framebuffer pixels",
+               b"PASS: native CREATESTRUCT callbacks, rejection, nested replacement and handle rundown",
+               b"PASS: native per-queue focus, ordered callbacks and reentrant HWND changes",
+               b"PASS: native child HWND ancestry, clipped Z order, descendant messages and cascade rundown",
+               b"PASS: native synchronous Unicode window text, selection replacement and bounded callback output",
+               b"PASS: native USER32 registers EDIT and keeps distinct single and multiline control state",
                b"PASS: native WM_PAINT, disjoint update clipping, nested erase and EndPaint rundown",
                b"PASS: native GetMessage blocks, cross-thread posts wake and dispatch, WM_QUIT drains",
-               b"PASS: VirtIO keyboard and mouse IRQs wake native USER, dispatch and paint")
+               b"PASS: VirtIO keyboard and mouse IRQs wake native USER, dispatch and paint", EDIT_PASS)
     if not evidence or any(marker not in log for marker in markers):
         raise RuntimeError("The guest did not verify the native desktop and VirtIO input")
     width, height, stride, pixel_format, dc = (int(value, 16) for value in evidence.groups())
@@ -83,6 +95,34 @@ def send_input(channel, events):
     qmp_command(channel, "input-send-event", {"events": events})
 
 
+def key(channel, code, down):
+    send_input(channel, [{"type": "key", "data": {"key": {"type": "qcode", "data": code}, "down": down}}])
+
+
+def tap(channel, code):
+    key(channel, code, True)
+    key(channel, code, False)
+
+
+def verify_edit_frame(target):
+    width, height, pixels = ppm(target)
+    if width < 369 or height < 99:
+        raise RuntimeError("RAMFB cannot display the edit window")
+    c = (0x00, 0x00, 0x1e, 0x33, 0x03, 0x33, 0x1e, 0x00)
+    b = (0x3f, 0x66, 0x66, 0x3e, 0x66, 0x66, 0x3f, 0x00)
+    for y in range(-1, 19):
+        for x in range(-1, 65):
+            inside = 0 <= x < 64 and 0 <= y < 18
+            glyph = 2 <= y < 10 and (2 <= x < 10 and c[y - 2] & (1 << (x - 2))
+                                     or 10 <= x < 18 and b[y - 2] & (1 << (x - 10)))
+            caret = x == 10 and y in (12, 13, 14)
+            value = 255 if inside and not (glyph or caret) else 0
+            offset = ((80 + y) * width + 304 + x) * 3
+            if pixels[offset:offset + 3] != bytes((value, value, value)):
+                raise RuntimeError(f"QMP edit window and clip pixel ({x}, {y}) differs")
+    print("PASS: QMP RAMFB edit glyphs, clipped caret and window bounds match")
+
+
 def capture(target, reference, command):
     target.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="xp-scanout-", dir="/tmp") as work:
@@ -108,9 +148,25 @@ def capture(target, reference, command):
                     for down in (True, False):
                         send_input(channel, [{"type": "btn", "data": {"button": "left", "down": down}}])
                     wait_for_marker(process, console, KEYBOARD_READY, deadline)
+                    tap(channel, "a")
+                    wait_for_marker(process, console, EDIT_CLICK, deadline)
+                    send_input(channel, [{"type": "rel", "data": {"axis": axis, "value": offset}}
+                                         for axis, offset in (("x", 50), ("y", 20))])
                     for down in (True, False):
-                        send_input(channel, [{"type": "key", "data": {"key": {"type": "qcode", "data": "a"},
-                                                                      "down": down}}])
+                        send_input(channel, [{"type": "btn", "data": {"button": "left", "down": down}}])
+                    wait_for_marker(process, console, EDIT_INITIAL, deadline)
+                    tap(channel, "a")
+                    key(channel, "shift", True)
+                    tap(channel, "b")
+                    key(channel, "shift", False)
+                    wait_for_marker(process, console, EDIT_KEYS, deadline)
+                    for code in ("left", "backspace", "c"):
+                        tap(channel, code)
+                    wait_for_marker(process, console, EDIT_PAINTED, deadline)
+                    edit_frame = Path(work) / "edit.ppm"
+                    qmp_command(channel, "screendump", {"filename": str(edit_frame)})
+                    verify_edit_frame(edit_frame)
+                    tap(channel, "ret")
                     log = wait_for_marker(process, console, READY, deadline)
                     qmp_command(channel, "screendump", {"filename": str(target.resolve())})
                     verify_capture(target, reference, log)

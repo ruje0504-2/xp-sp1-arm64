@@ -2,8 +2,9 @@
 
 This repository contains an audited subset of the native ARM64 port and its test
 sources. It covers the UEFI boot path, AArch64 exception entry and context switching,
-kernel and process address spaces, native user-mode dispatch, software rendering, and VirtIO-MMIO keyboard and mouse
-input for QEMU.
+kernel and process address spaces, native user-mode dispatch, timer accounting,
+and a software USER/GDI desktop with native EDIT controls and VirtIO-MMIO input
+for QEMU.
 
 The integration build requires separately authorized Windows XP SP1 source and
 port overlays. This export does not contain the complete build inputs or a bootable
@@ -31,3 +32,6 @@ clang -arch arm64 -march=armv8-a -std=c11 -O2 -Wall -Wextra -Werror -pthread \
 
 The ARM64 unwind implementation uses .NET Runtime code. The upstream files, pinned
 source references, and MIT notice are in [third_party/dotnet-unwind](third_party/dotnet-unwind).
+
+The software text renderer uses the public-domain font in [third_party/font8x8](third_party/font8x8). The pinned upstream files are
+included with their original notices.

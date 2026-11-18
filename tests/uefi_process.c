@@ -1891,7 +1891,7 @@ static VOID check_user_console_services(VOID)
     LARGE_INTEGER poll = {.QuadPart = -10000};
     const XP_ARM64_BOOT_DISPLAY *display = &CONTAINING_RECORD(KeLoaderBlock, XP_ARM64_BOOT_BLOCK, Nt)->Display;
     ULONGLONG deadline = KeQueryInterruptTime() + 20000000;
-    ULONG64 result[29] = {0};
+    ULONG64 result[31] = {0};
     ULONG pixels[12][16];
     ULONG stage;
     do {
@@ -1911,7 +1911,8 @@ static VOID check_user_console_services(VOID)
         }
         CHECK(KeDelayExecutionThread(KernelMode, FALSE, &poll) == STATUS_SUCCESS);
     } while (TRUE);
-    CHECK(ExpArm64CountUserObjects(process) == 3);
+    /* Two live windows, the application class, and the process EDIT class. */
+    CHECK(ExpArm64CountUserObjects(process) == 4);
     __asm__ volatile("msr daifset, #15" ::: "memory");
     CHECK(MmArm64CopyUserBuffer(space, start.Argument + 256, pixels, sizeof(pixels), FALSE) == STATUS_SUCCESS);
     __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
@@ -1958,6 +1959,14 @@ static VOID check_user_console_services(VOID)
         XpTestReport("READY: native USER waiting for VirtIO mouse\n");
         wait_for_input_probe(space, thread, start.Argument + 212, 2);
         XpTestReport("READY: native USER waiting for VirtIO keyboard\n");
+        wait_for_input_probe(space, thread, start.Argument + 212, 4);
+        XpTestReport("READY: native edit window waiting for focus click\n");
+        wait_for_input_probe(space, thread, start.Argument + 212, 5);
+        XpTestReport("READY: native edit window waiting for initial text\n");
+        wait_for_input_probe(space, thread, start.Argument + 212, 6);
+        XpTestReport("READY: native edit window waiting for editing keys\n");
+        wait_for_input_probe(space, thread, start.Argument + 212, 7);
+        XpTestReport("READY: native edit window painted and waiting for Return\n");
         timeout.QuadPart = -50000000;
     }
     CHECK(KeWaitForSingleObject(&thread->Tcb, Executive, KernelMode, FALSE, &timeout) == STATUS_SUCCESS);
@@ -2014,6 +2023,73 @@ static VOID check_user_console_services(VOID)
     XpTestReport(" lower="); XpTestHex(result[13]); XpTestReport(" upper="); XpTestHex(result[14]);
     XpTestReport(" reused="); XpTestHex(result[15] >> 32); XpTestReport(" revealed="); XpTestHex((ULONG)result[15]);
     XpTestReport("\nPASS: native HWND create, clipped DCs, visibility, handle revocation and exit rundown\n");
+    ULONG64 lifecycle[6];
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 0x500, lifecycle, sizeof(lifecycle), FALSE) ==
+          STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(lifecycle[0] == 0x1234 && lifecycle[1] == 0x14 && lifecycle[2] == 0x1234 &&
+          lifecycle[3] == 0x1234 && lifecycle[4] != lifecycle[5] &&
+          (USHORT)lifecycle[4] == (USHORT)lifecycle[5]);
+    XpTestReport("USER lifecycle evidence accepted="); XpTestHex(lifecycle[0]);
+    XpTestReport(" reject_nc="); XpTestHex(lifecycle[1]);
+    XpTestReport(" reject_create="); XpTestHex(lifecycle[2]);
+    XpTestReport(" reentrant="); XpTestHex(lifecycle[3]);
+    XpTestReport(" retired="); XpTestHex(lifecycle[4]);
+    XpTestReport(" replacement="); XpTestHex(lifecycle[5]);
+    XpTestReport("\nPASS: native CREATESTRUCT callbacks, rejection, nested replacement and handle rundown\n");
+    ULONG64 focus[4];
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 0x540, focus, sizeof(focus), FALSE) ==
+          STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(focus[0] == 0x2ab0 && focus[1] == 0x2a7e && focus[2] == 0x150 &&
+          focus[3] == (test_input ? 0x101 : 0));
+    XpTestReport("USER focus evidence direct="); XpTestHex(focus[0]);
+    XpTestReport(" redirect="); XpTestHex(focus[1]);
+    XpTestReport(" destroyed="); XpTestHex(focus[2]);
+    XpTestReport(" hardware="); XpTestHex(focus[3]);
+    XpTestReport("\nPASS: native per-queue focus, ordered callbacks and reentrant HWND changes\n");
+    ULONG64 children[4];
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 0x560, children, sizeof(children), FALSE) ==
+          STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(children[0] == 4 && children[1] == (display->VirtualBase ? 315 : 0) &&
+          children[2] == 0x123ba9 && children[3]);
+    XpTestReport("USER child evidence create_callbacks="); XpTestHex(children[0]);
+    XpTestReport(" clip_pixels="); XpTestHex(children[1]);
+    XpTestReport(" teardown="); XpTestHex(children[2]);
+    XpTestReport(" retired="); XpTestHex(children[3]);
+    XpTestReport("\nPASS: native child HWND ancestry, clipped Z order, descendant messages and cascade rundown\n");
+    ULONG64 text[4];
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 0x580, text, sizeof(text), FALSE) ==
+          STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(text[0] == 0x03a90070 && text[1] == 3 && text[2] == 0x71595870 && text[3] == 8);
+    XpTestReport("USER text send evidence utf16="); XpTestHex(text[0]);
+    XpTestReport(" nested_length="); XpTestHex(text[1]);
+    XpTestReport(" replacement="); XpTestHex(text[2]);
+    XpTestReport(" callbacks="); XpTestHex(text[3]);
+    XpTestReport("\nPASS: native synchronous Unicode window text, selection replacement and bounded callback output\n");
+    ULONG64 edit_class[4];
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    CHECK(MmArm64CopyUserBuffer(space, start.Argument + 0x5a0, edit_class, sizeof(edit_class), FALSE) ==
+          STATUS_SUCCESS);
+    __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    CHECK(edit_class[0] >= 0xc000 && edit_class[1] == 0x420a0d41 && edit_class[2] &&
+          edit_class[3] && edit_class[2] != edit_class[3]);
+    XpTestReport("USER32 EDIT evidence atom="); XpTestHex(edit_class[0]);
+    XpTestReport(" multiline="); XpTestHex(edit_class[1]);
+    XpTestReport(" single="); XpTestHex(edit_class[2]);
+    XpTestReport(" multi="); XpTestHex(edit_class[3]);
+    XpTestReport("\nPASS: native USER32 registers EDIT and keeps distinct single and multiline control state\n");
+
+
+
+
+
     CHECK((result[18] >> 32) == 2 && (ULONG)result[19] == 1 &&
           (result[19] >> 32) == 0x4b2e1f && (ULONG)result[20] == 0x674455 &&
           (result[20] >> 32) == 0x3050f0 && result[21] == 0x1122334455667788ULL);
@@ -2036,7 +2112,7 @@ static VOID check_user_console_services(VOID)
         CHECK(NT_SUCCESS(input.DiscoveryStatus) && NT_SUCCESS(input.StartStatus) &&
               input.KeyboardIrq != input.MouseIrq && input.KeyboardInterrupts && input.MouseInterrupts &&
               input.KeyboardEvents >= 2 && input.MouseEvents >= 4 && !input.Faults &&
-              (result[26] >> 32) == 3 && (ULONG)result[27] == 5 &&
+              (result[26] >> 32) == 8 && (ULONG)result[27] == 5 &&
               (result[27] >> 32) == 0x7cab5e && (ULONG)result[28] == 0x4392b1);
         XpTestReport("VirtIO input evidence key_irq="); XpTestHex(input.KeyboardIrq);
         XpTestReport(" mouse_irq="); XpTestHex(input.MouseIrq);
@@ -2045,7 +2121,10 @@ static VOID check_user_console_services(VOID)
         XpTestReport(" key_records="); XpTestHex(input.KeyboardEvents);
         XpTestReport(" mouse_records="); XpTestHex(input.MouseEvents);
         XpTestReport("\nPASS: VirtIO keyboard and mouse IRQs wake native USER, dispatch and paint\n");
-    } else CHECK(!result[26] && !result[27] && !result[28]);
+        CHECK((result[28] >> 32) == 0x00420063 && (ULONG)result[29] == 1 &&
+              (result[29] >> 32) == 16 && (ULONG)result[30] == 8);
+        XpTestReport("PASS: native TranslateMessage queues WM_CHAR, USER32 EDIT reads cB and text extent is 16x8\n");
+    } else CHECK(!result[26] && !result[27] && !result[28] && !result[29] && !result[30]);
     /* The thread signals before the executive reaper drops its reference.
      * Leave IRQ dispatch active until the kernel stack has been released. */
     deadline = KeQueryInterruptTime() + 10000000;

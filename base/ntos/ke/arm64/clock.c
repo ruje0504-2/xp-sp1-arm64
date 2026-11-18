@@ -1,11 +1,14 @@
 /* Resident kernel time publisher. Only the NT_UP boot path and actual
  * clock IRQ may publish. The kernel view is the owned TTBR1 data page. */
+#include "ki.h"
 #include "clock.h"
 #include "../../hal/arm64/gicv2.h"
 #include "../../mm/arm64/bootmap.h"
 
 KUSER_SHARED_DATA * const KiArm64SharedUserData=(KUSER_SHARED_DATA *)KI_USER_SHARED_DATA;
 static KI_ARM64_CLOCK_STATE clock_state;
+ULONG KeMaximumIncrement, KeTimeAdjustment, KiTickOffset;
+ULONG ExpTickCountMultiplier;
 _Static_assert(sizeof(KUSER_SHARED_DATA)<=PAGE_SIZE, "one resident shared page");
 
 static NTSTATUS validate_shared_page(ULONG64 physical, PULONG64 result, PULONG owner_type)
@@ -109,9 +112,24 @@ NTSTATUS KiArm64InitializeBootClock(const XP_ARM64_BOOT_TIME *time, ULONG64 phys
     clock_state.SharedPageLoaderType=owner;
     status=advance(HalArm64ReadCounter());
     if (!NT_SUCCESS(status)) { RtlZeroMemory(&clock_state,sizeof(clock_state));return status; }
+    /* The HAL currently offers a fixed 1 ms tick. Restore the XP startup
+     * contract before any caller can insert timers or query the increment. */
+    KeSetTimeIncrement(KI_ARM64_CLOCK_INCREMENT, KI_ARM64_CLOCK_INCREMENT);
+    KiTimeIncrementReciprocal = KiComputeReciprocal((LONG)KeMaximumIncrement, &KiTimeIncrementShiftCount);
+    ExpTickCountMultiplier = (ULONG)(((ULONG64)KeMaximumIncrement << 24) / 10000);
+    SharedUserData->TickCountMultiplier = ExpTickCountMultiplier;
     clock_state.Initialized=TRUE;
     return STATUS_SUCCESS;
 }
+/* The reciprocal returned by KiComputeReciprocal is an unsigned bit
+ * fraction. UMULH keeps both it and all 64 bits of due time unsigned. */
+ULONG64 KiArm64InterruptTicks(ULONG64 time)
+{
+    ULONG64 high;
+    __asm__("umulh %0, %1, %2" : "=r"(high) : "r"(time), "r"((ULONG64)KiTimeIncrementReciprocal.QuadPart));
+    return high >> KiTimeIncrementShiftCount;
+}
+
 NTSTATUS KiArm64UpdateBootClock(ULONG64 counter)
 {
     if (!clock_state.Initialized || !writer_environment()) return STATUS_INVALID_DEVICE_STATE;

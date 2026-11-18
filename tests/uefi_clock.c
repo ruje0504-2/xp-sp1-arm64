@@ -1,3 +1,4 @@
+#include "ki.h"
 #include "../base/boot/arm64/boot.h"
 #include "../base/ntos/ke/arm64/clock.h"
 #include "../base/ntos/hal/arm64/gicv2.h"
@@ -46,6 +47,34 @@ VOID XpCheckClockContracts(VOID)
     value.QuadPart=0x7fffffffffffffffLL;
     CHECK(RtlExtendedIntegerMultiply(value,2).QuadPart==-2);
     XpTestReport("PASS: original XP calendar conversion, UEFI timezone/rejection and counter scaling boundaries\n");
+    CHECK(KeQueryTimeIncrement() == 10000 && KeMinimumIncrement == 10000 &&
+          KeTimeIncrement == 10000 && KeTimeAdjustment == 10000 && KiTickOffset == 10000 &&
+          (ULONG64)KiTimeIncrementReciprocal.QuadPart == 0xd1b71758e219652cULL &&
+          KiTimeIncrementShiftCount == 13 && SharedUserData->TickCountMultiplier == 0x01000000 &&
+          !SharedUserData->TickCountLow);
+    const ULONG64 last_boundary = (~0ULL / 10000 - TIMER_TABLE_SIZE) * 10000;
+    KTIMER timer;
+    KeInitializeTimer(&timer);
+    for (ULONG bucket = 0; bucket < TIMER_TABLE_SIZE; ++bucket) {
+        const ULONG64 low = 10000ULL * (bucket + 1), high = last_boundary + 10000ULL * bucket;
+        const ULONG64 samples[] = {low - 1, low, low + 1, high - 1, high, high + 1};
+        for (ULONG i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+            ULONG64 time = samples[i];
+            LARGE_INTEGER current = {.QuadPart = (LONG64)(time - 1)};
+            LARGE_INTEGER interval = {.QuadPart = -1};
+            CHECK(KiArm64InterruptTicks(time) == time / 10000 &&
+                  KiComputeTimerTableIndex(interval, current, &timer) == (time / 10000) % TIMER_TABLE_SIZE &&
+                  timer.DueTime.QuadPart == time);
+        }
+    }
+    CHECK(KiArm64InterruptTicks(0) == 0 && KiArm64InterruptTicks(~0ULL) == ~0ULL / 10000);
+    XpTestReport("Clock setup evidence increment="); XpTestHex(KeQueryTimeIncrement());
+    XpTestReport(" reciprocal="); XpTestHex(KiTimeIncrementReciprocal.QuadPart);
+    XpTestReport(" shift="); XpTestHex(KiTimeIncrementShiftCount);
+    XpTestReport(" multiplier="); XpTestHex(SharedUserData->TickCountMultiplier);
+    XpTestReport(" samples="); XpTestHex(6 * TIMER_TABLE_SIZE + 2);
+    XpTestReport("\nPASS: original XP clock setup initializes native reciprocal timer buckets\n");
+
 }
 
 VOID XpCheckPublishedClock(PXP_ARM64_BOOT_BLOCK block)

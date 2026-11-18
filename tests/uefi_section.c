@@ -197,7 +197,10 @@ static VOID check_user_service(VOID)
     RtlZeroMemory(entry, sizeof(*entry));
     entry->Frame.Pc = code;
     entry->Frame.Sp = stack + PAGE_SIZE;
+    _Static_assert(FIELD_OFFSET(KUSER_SHARED_DATA, TickCountLow) == 0 &&
+                   FIELD_OFFSET(KUSER_SHARED_DATA, TickCountMultiplier) == 4, "XP tick ABI");
     entry->Frame.X[2] = MM_ARM64_USER_SHARED_VA + FIELD_OFFSET(KUSER_SHARED_DATA, InterruptTime);
+    entry->Frame.X[3] = MM_ARM64_USER_SHARED_VA;
     ULONG64 daif;
     __asm__ volatile("mrs %0, daif\nmsr daifset, #15" : "=r"(daif) :: "memory");
     PXP_ARM64_BOOT_BLOCK boot = CONTAINING_RECORD(KeLoaderBlock, XP_ARM64_BOOT_BLOCK, Nt);
@@ -207,6 +210,7 @@ static VOID check_user_service(VOID)
           MmArm64CopyUserBuffer(&space, code, (PVOID)XpUserProgram, length, TRUE) == STATUS_SUCCESS &&
           MmArm64ProtectUserPages(&space, code, PAGE_SIZE, PAGE_EXECUTE_READ) == STATUS_SUCCESS);
     __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+    ULONG initial_tick = SharedUserData->TickCountLow;
     ULONG services = 0, interrupts = 0;
     ULONG64 permission_esr = 0;
     ULONGLONG deadline = KeQueryInterruptTime() + 20000000;
@@ -248,6 +252,13 @@ static VOID check_user_service(VOID)
     XpTestReport(" frequency="); XpTestHex(entry->Frame.X[22]);
     XpTestReport(" irqs="); XpTestHex(interrupts);
     XpTestReport(" write_esr="); XpTestHex(permission_esr); XpTestReport("\n");
+    ULONG sample = (ULONG)entry->Frame.X[27];
+    CHECK(sample && sample >= initial_tick && sample <= SharedUserData->TickCountLow &&
+          entry->Frame.X[28] == sample);
+    XpTestReport("Shared EL0 tick evidence raw="); XpTestHex(sample);
+    XpTestReport(" milliseconds="); XpTestHex(entry->Frame.X[28]);
+    XpTestReport("\nPASS: ARM64 EL0 reads XP shared tick count and converts it to milliseconds\n");
+
     __asm__ volatile("msr daifset, #15" ::: "memory");
     MmArm64DestroyUserSpace(&space);
     __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");

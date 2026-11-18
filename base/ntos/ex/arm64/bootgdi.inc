@@ -163,9 +163,11 @@ static ULONG acquire_user_dc(PKTHREAD thread, ARM64_CONSOLE_DESKTOP *desktop,
 
 static VOID discard_window_posts(ARM64_USER_THREAD *thread, ULONG_PTR hwnd);
 
+#include "bootwndcall.inc"
 #include "bootwindow.inc"
 #include "bootpaint.inc"
 #include "bootmsg.inc"
+#include "bootsend.inc"
 #include "bootinput.inc"
 
 VOID ExpArm64ReleaseGdiObjects(PEPROCESS process)
@@ -188,8 +190,12 @@ VOID ExpArm64ReleaseGdiObjects(PEPROCESS process)
 VOID ExpArm64ReleaseThreadUserObjects(PKTHREAD thread)
 {
     gdi_enter();
-    for (ULONG slot = 0; slot < USER_WINDOW_LIMIT; ++slot)
-        if (user_windows[slot].Owner == thread) window_destroy(&user_windows[slot]);
+    if (foreground_queue == thread->Win32Thread) foreground_queue = NULL;
+    for (PLIST_ENTRY link = window_order.Blink; link != &window_order;) {
+        ARM64_USER_WINDOW *window = CONTAINING_RECORD(link, ARM64_USER_WINDOW, ZOrder);
+        link = link->Blink;
+        if (window->Owner == thread) window_destroy(window);
+    }
     for (ULONG slot = 0; slot < GDI_SLOT_COUNT; ++slot) {
         ARM64_GDI_ENTRY *entry = &gdi_objects[slot];
         if (entry->Owner && entry->Type == GdiMemoryDc &&
@@ -335,6 +341,8 @@ static BOOLEAN gdi_dc_raster(ULONG_PTR handle, BOOLEAN write, ARM64_GDI_RASTER *
     }
     return TRUE;
 }
+
+#include "boottext.inc"
 
 static ULONG gdi_pixel(ULONG_PTR handle, LONG x, LONG y, BOOLEAN write, ULONG color)
 {

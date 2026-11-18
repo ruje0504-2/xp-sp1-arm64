@@ -10,48 +10,8 @@ typedef struct {
     UCHAR Reserved[32];
 } ARM64_USER_PAINT;
 
-/* XP fnDWORD's ordinal and native-sized fields. The window argument in this
- * dispatcher is an HWND; the port has no client mapping of kernel WNDs. */
-typedef struct {
-    ULONG_PTR Window;
-    ULONG Message;
-    ULONG_PTR WParam, LParam, Extra, Procedure;
-} ARM64_USER_WNDPROC_CALL;
-
-typedef struct {
-    ULONG_PTR Result;
-    ULONG OutputBytes;
-    ULONG_PTR Output;
-} ARM64_USER_CALLBACK_STATUS;
-
 _Static_assert(sizeof(ARM64_USER_PAINT) == 72 && FIELD_OFFSET(ARM64_USER_PAINT, Rect) == 12,
                "native PAINTSTRUCT");
-_Static_assert(sizeof(ARM64_USER_WNDPROC_CALL) == 48 && FIELD_OFFSET(ARM64_USER_WNDPROC_CALL, Procedure) == 40,
-               "native fnDWORD");
-_Static_assert(sizeof(ARM64_USER_CALLBACK_STATUS) == 24, "native CALLBACKSTATUS");
-
-/* The caller snapshots the procedure under gdi_lock and drops the lock
- * before entering user mode. The HWND may be destroyed during the callback. */
-static BOOLEAN call_window_procedure(ULONG_PTR handle, ULONG_PTR procedure, ULONG message,
-                                     ULONG_PTR wparam, ULONG_PTR lparam, PULONG_PTR result)
-{
-    ARM64_USER_WNDPROC_CALL call;
-    RtlZeroMemory(&call, sizeof(call));
-    call.Window = handle;
-    call.Message = message;
-    call.WParam = wparam;
-    call.LParam = lparam;
-    call.Procedure = procedure;
-    PVOID output;
-    ULONG bytes;
-    NTSTATUS status = KeUserModeCallback(XP_FI_FNDWORD, &call, sizeof(call), &output, &bytes);
-    ARM64_USER_CALLBACK_STATUS returned;
-    if (!NT_SUCCESS(status) || bytes != sizeof(returned) ||
-        !NT_SUCCESS(copy_user_input((ULONG_PTR)output, &returned, sizeof(returned))) ||
-        returned.OutputBytes || returned.Output) return FALSE;
-    *result = returned.Result;
-    return TRUE;
-}
 
 static ULONG_PTR user_invalidate_rect(WIN32_ARGS)
 {
@@ -166,7 +126,8 @@ static ULONG_PTR user_end_paint(WIN32_ARGS)
 
 static BOOLEAN has_paint_message(const ARM64_USER_WINDOW *window)
 {
-    return window->Visible && !window->PaintDc && !window->DispatchingPaint &&
+    ARM64_USER_RECT clip;
+    return !window->PaintDc && !window->DispatchingPaint && window_screen_clip(window, &clip) &&
            !empty_rect(&window->Update.Bounds);
 }
 
