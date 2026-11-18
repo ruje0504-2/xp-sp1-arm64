@@ -119,5 +119,14 @@ NTSTATUS PsArm64InitializeProcessImage(PEPROCESS process, const VOID *file, SIZE
     }
     PspUnlockProcessExclusive(process, current);
     ExFreePool(PebBase);
+    if (NT_SUCCESS(status) && PsImageNotifyEnabled) {
+        IMAGE_INFO info = {
+            .ImageAddressingMode = IMAGE_ADDRESSING_MODE_32BIT,
+            .ImageBase = (PVOID)image.PreferredBase,
+            .ImageSize = image.Size,
+        };
+        /* The caller supplied bytes without a file object or pathname. */
+        PsCallImageNotifyRoutines(NULL, process->UniqueProcessId, &info);
+    }
     return status;
 }

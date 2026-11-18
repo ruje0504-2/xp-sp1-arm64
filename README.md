@@ -11,6 +11,12 @@ port overlays. This export does not contain the complete build inputs or a boota
 image. Integrated results from the development tree were obtained in QEMU.
 Nintendo Switch Lite hardware execution is pending.
 
+## Process, thread and image notifications
+
+The native image hook and process test cover the original XP notification order.
+The QEMU integration test observes unregistering while a callback is active.
+The integration build uses separately authorized XP callback source inputs.
+
 ## Standalone controls on ARM64 macOS
 
 From the repository root, compile and run the atomic operations and context-capture

@@ -226,16 +226,117 @@ static ULONG_PTR check_win32_callback(ULONG_PTR api, ULONG_PTR cookie, ULONG_PTR
 
 static PKARM64_WIN32_SERVICE const win32_services[] = {check_win32_callback};
 
+typedef struct {
+    PEPROCESS Process;
+    PETHREAD Creator, Remover;
+    HANDLE Tid;
+    KEVENT Entered;
+    volatile BOOLEAN Removing;
+    BOOLEAN ObservedWait;
+    NTSTATUS RemoveStatus;
+    ULONG Sequence;
+} PS_NOTIFY_PROBE;
+
+static PS_NOTIFY_PROBE *ps_notify_probe;
+
+static VOID record_image_load(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
+{
+    PS_NOTIFY_PROBE *probe = ps_notify_probe;
+    if (pid != probe->Process->UniqueProcessId) return;
+    CHECK(!probe->Sequence && KeGetCurrentIrql() == PASSIVE_LEVEL &&
+          PsGetCurrentThread() == probe->Creator && !name && !info->SystemModeImage &&
+          !info->ImageMappedToAllPids && info->ImageAddressingMode == IMAGE_ADDRESSING_MODE_32BIT &&
+          info->ImageBase == probe->Process->SectionBaseAddress && probe->Process->Peb);
+    const IMAGE_DOS_HEADER *dos = (const VOID *)XpUserImage;
+    const IMAGE_NT_HEADERS64 *nt = (const VOID *)(XpUserImage + dos->e_lfanew);
+    CHECK(info->ImageSize == nt->OptionalHeader.SizeOfImage);
+    ++probe->Sequence;
+}
+
+static VOID record_process_notify(HANDLE parent, HANDLE pid, BOOLEAN create)
+{
+    PS_NOTIFY_PROBE *probe = ps_notify_probe;
+    if (pid != probe->Process->UniqueProcessId) return;
+    CHECK(parent == probe->Process->InheritedFromUniqueProcessId && KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (create)
+        CHECK(probe->Sequence == 1 && PsGetCurrentThread() == probe->Creator &&
+              probe->Process->ActiveThreads == 1);
+    else
+        CHECK(probe->Sequence == 4 && PsGetCurrentThread()->Cid.UniqueThread == probe->Tid &&
+              !probe->Process->ActiveThreads && probe->Process->ObjectTable &&
+              (probe->Process->Flags & PS_PROCESS_FLAGS_PROCESS_EXITING));
+    ++probe->Sequence;
+}
+
+static VOID record_thread_notify(HANDLE pid, HANDLE tid, BOOLEAN create)
+{
+    PS_NOTIFY_PROBE *probe = ps_notify_probe;
+    if (pid != probe->Process->UniqueProcessId) return;
+    CHECK(tid && probe->Process->ActiveThreads == 1 && KeGetCurrentIrql() == PASSIVE_LEVEL);
+    if (create) {
+        CHECK(probe->Sequence == 2 && PsGetCurrentThread() == probe->Creator);
+        /* XP sends create notification before the thread's access is published. */
+        PETHREAD unpublished = NULL;
+        CHECK(PsLookupThreadByThreadId(tid, &unpublished) == STATUS_INVALID_PARAMETER && !unpublished);
+        probe->Tid = tid;
+    } else {
+        CHECK(probe->Sequence == 3 && probe->Tid == tid && PsGetCurrentThread()->Cid.UniqueThread == tid &&
+              PsGetCurrentThread()->Tcb.Teb);
+    }
+    ++probe->Sequence;
+}
+
+static VOID block_process_notify(HANDLE parent, HANDLE pid, BOOLEAN create)
+{
+    UNREFERENCED_PARAMETER(parent);
+    PS_NOTIFY_PROBE *probe = ps_notify_probe;
+    if (pid != probe->Process->UniqueProcessId) return;
+    CHECK(create && !probe->ObservedWait);
+    KeSetEvent(&probe->Entered, 0, FALSE);
+    LARGE_INTEGER delay = {.QuadPart = -10000};
+    ULONG64 deadline = KeQueryInterruptTime() + 5000000;
+    while (!probe->Removing || probe->Remover->Tcb.State != Waiting)
+        CHECK(KeQueryInterruptTime() < deadline &&
+              KeDelayExecutionThread(KernelMode, FALSE, &delay) == STATUS_SUCCESS);
+    CHECK(probe->RemoveStatus == STATUS_PENDING && probe->Remover->Tcb.WaitReason == Executive &&
+          probe->Remover->Tcb.WaitBlockList && probe->Remover->Tcb.WaitBlockList->Object != &probe->Entered);
+    probe->ObservedWait = TRUE;
+}
+
+static VOID remove_process_notify(PVOID context)
+{
+    PS_NOTIFY_PROBE *probe = context;
+    LARGE_INTEGER deadline = {.QuadPart = -10000000};
+    CHECK(KeWaitForSingleObject(&probe->Entered, Executive, KernelMode, FALSE, &deadline) == STATUS_SUCCESS);
+    probe->Removing = TRUE;
+    probe->RemoveStatus = PsSetCreateProcessNotifyRoutine(block_process_notify, TRUE);
+    CHECK(probe->ObservedWait && probe->RemoveStatus == STATUS_SUCCESS);
+}
+
 static VOID check_child_thread(PEPROCESS process, HANDLE process_handle)
 {
     XP_ARM64_USER_START start = {0x20000, 0x51000, 0x50000, 0x70000, 0x10000};
     MM_ARM64_USER_SPACE *space = PsArm64UserProcessSpace(process);
     SIZE_T length = (ULONG_PTR)XpUserImageEnd - (ULONG_PTR)XpUserImage;
     ULONG_PTR entry, peb = 0x90000;
+    PS_NOTIFY_PROBE notify = {.Process = process, .Creator = PsGetCurrentThread(), .RemoveStatus = STATUS_PENDING};
+    KeInitializeEvent(&notify.Entered, SynchronizationEvent, FALSE);
+    ps_notify_probe = &notify;
+    OBJECT_ATTRIBUTES attributes;
+    InitializeObjectAttributes(&attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    HANDLE remover;
+    CHECK(PsCreateSystemThread(&remover, THREAD_ALL_ACCESS, &attributes, NULL, NULL,
+                               remove_process_notify, &notify) == STATUS_SUCCESS &&
+          ObReferenceObjectByHandle(remover, SYNCHRONIZE, PsThreadType, KernelMode,
+                                    (PVOID *)&notify.Remover, NULL) == STATUS_SUCCESS);
+    CHECK(PsSetCreateProcessNotifyRoutine(record_process_notify, FALSE) == STATUS_SUCCESS &&
+          PsSetCreateProcessNotifyRoutine(block_process_notify, FALSE) == STATUS_SUCCESS &&
+          PsSetCreateThreadNotifyRoutine(record_thread_notify) == STATUS_SUCCESS &&
+          PsSetLoadImageNotifyRoutine(record_image_load) == STATUS_SUCCESS);
     CHECK(PsArm64InitializeProcessImage(process, XpUserImage, sizeof(IMAGE_DOS_HEADER), peb, &entry) ==
           STATUS_INVALID_IMAGE_FORMAT && !entry && !process->Peb);
     CHECK(PsArm64InitializeProcessImage(process, XpUserImage, length, start.Argument, &entry) ==
-          STATUS_CONFLICTING_ADDRESSES && !entry && !process->SectionBaseAddress && !process->Peb);
+          STATUS_CONFLICTING_ADDRESSES && !entry && !process->SectionBaseAddress && !process->Peb && !notify.Sequence);
     CHECK(PsArm64InitializeProcessImage(process, XpUserImage, length, peb, &entry) == STATUS_SUCCESS);
     start.Pc = entry;
     CHECK(PsArm64SetUserExceptionDispatcher(process, peb) == STATUS_ACCESS_VIOLATION &&
@@ -265,14 +366,22 @@ static VOID check_child_thread(PEPROCESS process, HANDLE process_handle)
     ULONG_PTR teb = start.Teb;
     start.Teb = (ULONG_PTR)copied.ImageBaseAddress;
     CHECK(PsArm64CreateUserThread(process_handle, &start, &handle, &cid) == STATUS_CONFLICTING_ADDRESSES &&
-          !handle && !cid.UniqueThread && !process->ActiveThreads && !process->Pcb.Header.SignalState);
+          !handle && !cid.UniqueThread && !process->ActiveThreads && !process->Pcb.Header.SignalState && notify.Sequence == 1);
     start.Teb = teb;
     CHECK(PsArm64CreateUserThread(process_handle, &start, &handle, &cid) == STATUS_SUCCESS &&
-          cid.UniqueProcess == process->UniqueProcessId && cid.UniqueThread);
+          cid.UniqueProcess == process->UniqueProcessId && cid.UniqueThread == notify.Tid && notify.ObservedWait);
+    LARGE_INTEGER remove_limit = {.QuadPart = -10000000};
+    CHECK(KeWaitForSingleObject(&notify.Remover->Tcb, Executive, KernelMode, FALSE, &remove_limit) == STATUS_SUCCESS &&
+          notify.Remover->ExitStatus == STATUS_SUCCESS && notify.RemoveStatus == STATUS_SUCCESS);
+    ObDereferenceObject(notify.Remover);
+    CHECK(ObArm64CloseBootObjectHandle(remover) == STATUS_SUCCESS);
     PETHREAD thread;
     CHECK(ObReferenceObjectByHandle(handle, SYNCHRONIZE, PsThreadType, KernelMode, (PVOID *)&thread, NULL) ==
           STATUS_SUCCESS && thread->ThreadsProcess == process && thread->Cid.UniqueThread == cid.UniqueThread &&
           !(thread->CrossThreadFlags & PS_CROSS_THREAD_FLAGS_SYSTEM));
+    PETHREAD published;
+    CHECK(PsLookupThreadByThreadId(cid.UniqueThread, &published) == STATUS_SUCCESS && published == thread);
+    ObDereferenceObject(published);
     USER_APC_PROBE apcs[3] = {0};
     for (ULONG index = 0; index < (sizeof(apcs) / sizeof(apcs[0])); ++index) {
         wait_for_user_delay(space, start.Argument, &thread->Tcb, index + 1);
@@ -346,6 +455,19 @@ static VOID check_child_thread(PEPROCESS process, HANDLE process_handle)
     ObDereferenceObject(thread);
     CHECK(ObArm64CloseBootObjectHandle(handle) == STATUS_SUCCESS);
     XpTestReport("PASS: scheduled child EL0 thread, TEB identity, native service and last-thread process exit\n");
+    CHECK(notify.Sequence == 5);
+    CHECK(PsSetCreateProcessNotifyRoutine(record_process_notify, TRUE) == STATUS_SUCCESS &&
+          PsRemoveCreateThreadNotifyRoutine(record_thread_notify) == STATUS_SUCCESS &&
+          PsRemoveLoadImageNotifyRoutine(record_image_load) == STATUS_SUCCESS);
+    CHECK(PsSetCreateProcessNotifyRoutine(block_process_notify, TRUE) == STATUS_PROCEDURE_NOT_FOUND &&
+          PsSetCreateProcessNotifyRoutine(record_process_notify, TRUE) == STATUS_PROCEDURE_NOT_FOUND &&
+          PsRemoveCreateThreadNotifyRoutine(record_thread_notify) == STATUS_PROCEDURE_NOT_FOUND &&
+          PsRemoveLoadImageNotifyRoutine(record_image_load) == STATUS_PROCEDURE_NOT_FOUND);
+    ps_notify_probe = NULL;
+    XpTestReport("PS notify evidence callbacks="); XpTestHex(notify.Sequence);
+    XpTestReport(" rundown_wait="); XpTestHex(notify.ObservedWait);
+    XpTestReport(" removal="); XpTestHex(notify.RemoveStatus); XpTestReport("\n");
+    XpTestReport("PASS: XP process, thread and image notifications with in-flight rundown\n");
 }
 
 static VOID check_child_process(VOID)
